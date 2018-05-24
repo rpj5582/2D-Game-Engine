@@ -110,19 +110,23 @@ void Renderer::render(const Camera& camera, const Terrain& terrain)
 
 	const Chunk* chunks = terrain.getVisibleChunks();
 
-	unsigned int vao = terrain.getVAO();
-	glBindVertexArray(vao);
-
 	for (size_t i = 0; i < CHUNK_VIEW_SIZE; i++)
 	{
+		// Bind the chunk's VAO
+		glBindVertexArray(chunks[i].vao);
+
+		unsigned int blockCountSum = 0;
 		for (size_t j = 1; j < BLOCK_COUNT; j++)
 		{
+			// Add to the block sum so the instance offset is consistent
+			blockCountSum += chunks[i].blockCount[j - 1];
+
 			// Don't render this block type if there aren't any present in the chunk
 			if (chunks[i].blockCount[j] == 0) continue;
 
 			// Get the pointer to the start of the blocks we want to render
 			// Offset the sprites array by the previous block's count
-			const Sprite* sprites = chunks[i].sprites + chunks[i].blockCount[j - 1];
+			const Sprite* sprites = chunks[i].sprites + blockCountSum;
 
 			// Use the shader
 			glUseProgram(sprites[0].renderData.shaderID);
@@ -135,7 +139,7 @@ void Renderer::render(const Camera& camera, const Terrain& terrain)
 			glBindTexture(GL_TEXTURE_2D, sprites[0].renderData.textureID);
 
 			// Draw the block using instanced rendering
-			glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (void*)0, chunks[i].blockCount[j]);
+			glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (void*)0, chunks[i].blockCount[j], blockCountSum);
 		}
 	}
 }

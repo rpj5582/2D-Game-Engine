@@ -14,6 +14,7 @@
 
 struct Chunk
 {
+	unsigned int vao;
 	unsigned int vbo;
 	Sprite sprites[CHUNK_SIZE * CHUNK_SIZE];
 	unsigned int blockCount[BLOCK_COUNT];
@@ -24,8 +25,6 @@ class Terrain
 public:
 	Terrain(unsigned int vertexBufferID, unsigned int indexBufferID);
 	~Terrain();
-
-	unsigned int getVAO() const;
 
 	const Chunk* getVisibleChunks() const;
 
@@ -41,5 +40,4 @@ private:
 	SimplexNoise* m_noise;
 
 	Chunk* m_visibleChunks;
-	unsigned int m_vao;
 };

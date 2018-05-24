@@ -15,41 +15,38 @@ Terrain::Terrain(unsigned int vertexBufferID, unsigned int indexBufferID)
 
 	glm::mat4 worldMatrices[CHUNK_SIZE * CHUNK_SIZE] = {};
 
-	glGenVertexArrays(1, &m_vao);
-	glBindVertexArray(m_vao);
-
-	glBindBuffer(GL_ARRAY_BUFFER, vertexBufferID);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBufferID);
-
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
-
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(sizeof(float) * 2));
-
 	for (unsigned int i = 0; i < CHUNK_VIEW_SIZE; i++)
 	{
-		unsigned int vbo;
-		glGenBuffers(1, &vbo);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+		glGenVertexArrays(1, &m_visibleChunks[i].vao);
+		glBindVertexArray(m_visibleChunks[i].vao);
+
+		glBindBuffer(GL_ARRAY_BUFFER, vertexBufferID);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBufferID);
+
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(sizeof(float) * 2));
+
+		glGenBuffers(1, &m_visibleChunks[i].vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, m_visibleChunks[i].vbo);
 		glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * CHUNK_SIZE * CHUNK_SIZE, &worldMatrices[0][0], GL_STREAM_DRAW);
 
-		glEnableVertexAttribArray(2 + i * 4);
-		glEnableVertexAttribArray(3 + i * 4);
-		glEnableVertexAttribArray(4 + i * 4);
-		glEnableVertexAttribArray(5 + i * 4);
+		glEnableVertexAttribArray(2);
+		glEnableVertexAttribArray(3);
+		glEnableVertexAttribArray(4);
+		glEnableVertexAttribArray(5);
 
-		glVertexAttribPointer(2 + i * 4, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)0);
-		glVertexAttribPointer(3 + i * 4, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)sizeof(glm::vec4));
-		glVertexAttribPointer(4 + i * 4, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * 2));
-		glVertexAttribPointer(5 + i * 4, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * 3));
+		glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)0);
+		glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)sizeof(glm::vec4));
+		glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * 2));
+		glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), (void*)(sizeof(glm::vec4) * 3));
 
-		glVertexAttribDivisor(2 + i * 4, 1);
-		glVertexAttribDivisor(3 + i * 4, 1);
-		glVertexAttribDivisor(4 + i * 4, 1);
-		glVertexAttribDivisor(5 + i * 4, 1);
-
-		m_visibleChunks[i].vbo = vbo;
+		glVertexAttribDivisor(2, 1);
+		glVertexAttribDivisor(3, 1);
+		glVertexAttribDivisor(4, 1);
+		glVertexAttribDivisor(5, 1);
 	}
 }
 
@@ -58,17 +55,11 @@ Terrain::~Terrain()
 	for (size_t i = 0; i < CHUNK_VIEW_SIZE; i++)
 	{
 		glDeleteBuffers(1, &m_visibleChunks[i].vbo);
+		glDeleteVertexArrays(1, &m_visibleChunks[i].vao);
 	}
-
-	glDeleteVertexArrays(1, &m_vao);
 
 	delete[] m_visibleChunks;
 	delete m_noise;
-}
-
-unsigned int Terrain::getVAO() const
-{
-	return m_vao;
 }
 
 const Chunk* Terrain::getVisibleChunks() const
@@ -100,6 +91,7 @@ void Terrain::genChunk(ptrdiff_t x, ptrdiff_t y, size_t index)
 	assert(index >= 0 && index < CHUNK_VIEW_SIZE);
 
 	Chunk& chunk = m_visibleChunks[index];
+	memset(chunk.blockCount, 0, sizeof(unsigned int) * BLOCK_COUNT);
 
 	glm::vec2 chunkOriginWorld = chunkToWorldCoords(x, y);
 
@@ -110,16 +102,42 @@ void Terrain::genChunk(ptrdiff_t x, ptrdiff_t y, size_t index)
 		surface[i] = (int)(roundf(m_noise->fractal(OCTAVES, (chunkOriginWorld.x + i * BLOCK_SIZE + 1) / SMOOTHNESS) * HEIGHT_FLUX / BLOCK_SIZE) * BLOCK_SIZE);
 	}
 
+	// Generate the stone veins
+	int stoneValues[CHUNK_SIZE * CHUNK_SIZE];
+	for (size_t j = 0; j < CHUNK_SIZE; j++)
+	{
+		for (size_t i = 0; i < CHUNK_SIZE; i++)
+		{
+			float x = (chunkOriginWorld.x + i * BLOCK_SIZE + 1) / SMOOTHNESS;
+			float y = (chunkOriginWorld.y + j * BLOCK_SIZE + 1) / SMOOTHNESS;
+			float noise = SimplexNoise::noise(x, y);
+			stoneValues[i + j * CHUNK_SIZE] = (int)roundf(noise * HEIGHT_FLUX / BLOCK_SIZE) * BLOCK_SIZE;
+		}
+	}
+
 	// Populate the chunk
 	for (size_t j = 0; j < CHUNK_SIZE; j++)
 	{
 		for (size_t i = 0; i < CHUNK_SIZE; i++)
 		{
 			// Add a dirt block if the we're at or below the surface value
-			if (chunkOriginWorld.y + j * BLOCK_SIZE <= surface[i])
+			if (chunkOriginWorld.y + j * BLOCK_SIZE == surface[i])
 			{
-				setBlock(chunk.sprites[i + j * CHUNK_SIZE], DIRT, chunkOriginWorld + glm::vec2(i * BLOCK_SIZE, j * BLOCK_SIZE));
-				chunk.blockCount[DIRT]++;
+				setBlock(chunk.sprites[i + j * CHUNK_SIZE], GRASS, chunkOriginWorld + glm::vec2(i * BLOCK_SIZE, j * BLOCK_SIZE));
+				chunk.blockCount[GRASS]++;
+			}
+			else if (chunkOriginWorld.y + j * BLOCK_SIZE < surface[i])
+			{
+				if (chunkOriginWorld.y + j * BLOCK_SIZE < surface[i] - 8 * BLOCK_SIZE && stoneValues[i + j * CHUNK_SIZE] >= 0)
+				{
+					setBlock(chunk.sprites[i + j * CHUNK_SIZE], STONE, chunkOriginWorld + glm::vec2(i * BLOCK_SIZE, j * BLOCK_SIZE));
+					chunk.blockCount[STONE]++;
+				}
+				else
+				{
+					setBlock(chunk.sprites[i + j * CHUNK_SIZE], DIRT, chunkOriginWorld + glm::vec2(i * BLOCK_SIZE, j * BLOCK_SIZE));
+					chunk.blockCount[DIRT]++;
+				}
 			}
 			else // Add an air block if we're above the surface value
 			{

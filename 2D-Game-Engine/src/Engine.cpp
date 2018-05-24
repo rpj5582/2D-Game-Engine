@@ -14,7 +14,6 @@ Engine::Engine(int width, int height)
 	BlockContainer blocks;
 
 	m_sprites = std::vector<Sprite>();
-	m_sprites.push_back({ glm::vec2(0.0f, 100.0f), glm::vec2(BLOCK_SIZE), 3.14159265359f / 4.0f, m_assetManager->getTexture("dirt"), m_assetManager->getShader("defaultShader") });
 
 	m_terrain->genStartingChunks(glm::vec2());
 }

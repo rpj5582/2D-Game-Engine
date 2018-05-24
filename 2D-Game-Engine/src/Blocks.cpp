@@ -9,9 +9,13 @@ BlockContainer::BlockContainer()
 
 	unsigned int terrainShaderID = assetManager->loadShader("terrainShader", "shaders/terrainVertexShader.glsl", "shaders/fragmentShader.glsl");
 	unsigned int dirtTextureID = assetManager->loadTexture("dirt", "textures/test.png");
+	unsigned int grassTextureID = assetManager->loadTexture("grass", "textures/100_final_grass_texture.png");
+	unsigned int stoneTextureID = assetManager->loadTexture("stone", "textures/rock.png");
 
 	blocks[AIR] = { 0, 0 };
 	blocks[DIRT] = { dirtTextureID, terrainShaderID };
+	blocks[GRASS] = { grassTextureID, terrainShaderID };
+	blocks[STONE] = { stoneTextureID, terrainShaderID };
 }
 
 BlockContainer::~BlockContainer()
