@@ -4,7 +4,9 @@
 #include "Camera.h"
 
 #include <GL/glew.h>
-#include <glm.hpp>
+
+// The amount that should be subtracted from the texture dimensions when rendering to fix gridlike artifacts
+#define TEXTURE_SHRINK_FACTOR FLT_EPSILON * 10
 
 struct Vertex
 {

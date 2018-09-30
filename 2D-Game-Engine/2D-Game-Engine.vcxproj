@@ -23,11 +23,14 @@
     <ClCompile Include="src\AssetManager.cpp" />
     <ClCompile Include="src\Blocks.cpp" />
     <ClCompile Include="src\Camera.cpp" />
+    <ClCompile Include="src\CollisionHandler.cpp" />
     <ClCompile Include="src\Engine.cpp" />
     <ClCompile Include="src\Input.cpp" />
     <ClCompile Include="src\Output.cpp" />
+    <ClCompile Include="src\PlayerController.cpp" />
     <ClCompile Include="src\Renderer.cpp" />
     <ClCompile Include="src\SimplexNoise\SimplexNoise.cpp" />
+    <ClCompile Include="src\Sprite.cpp" />
     <ClCompile Include="src\stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
@@ -39,9 +42,11 @@
     <ClInclude Include="src\AssetManager.h" />
     <ClInclude Include="src\Blocks.h" />
     <ClInclude Include="src\Camera.h" />
+    <ClInclude Include="src\CollisionHandler.h" />
     <ClInclude Include="src\Engine.h" />
     <ClInclude Include="src\Input.h" />
     <ClInclude Include="src\Output.h" />
+    <ClInclude Include="src\PlayerController.h" />
     <ClInclude Include="src\Renderer.h" />
     <ClInclude Include="src\SimplexNoise\SimplexNoise.h" />
     <ClInclude Include="src\Sprite.h" />

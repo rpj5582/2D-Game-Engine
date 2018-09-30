@@ -14,11 +14,27 @@ Camera::~Camera()
 {
 }
 
+glm::vec2 Camera::getPosition() const
+{
+	return m_position;
+}
+
+int Camera::getWidth() const
+{
+	return m_width;
+}
+
+int Camera::getHeight() const
+{
+	return m_height;
+}
+
 void Camera::translate(glm::vec2 delta)
 {
 	m_position += delta;
-	glm::vec3 positionVec3 = glm::vec3(m_position, 0.0f);
-	m_view = glm::lookAt(positionVec3, positionVec3 + glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	glm::vec3 position = glm::vec3(m_position, 0.0f);
+	position.y = fminf(CAMERA_VERTICAL_CLAMP - m_height * 0.5f, fmaxf(position.y, -CAMERA_VERTICAL_CLAMP + m_height * 0.5f));
+	m_view = glm::lookAt(position, position + glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
 void Camera::resize(int width, int height)

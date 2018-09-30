@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstddef>  // size_t
+#include <algorithm> // std::sort
 
 /**
  * @brief A Perlin Simplex Noise C++ Implementation (1D, 2D, 3D, 4D).
@@ -36,17 +37,15 @@ public:
      * @param[in] lacunarity   Lacunarity specifies the frequency multiplier between successive octaves (default to 2.0).
      * @param[in] persistence  Persistence is the loss of amplitude between successive octaves (usually 1/lacunarity)
      */
-    explicit SimplexNoise(float frequency = 1.0f,
-                          float amplitude = 1.0f,
-                          float lacunarity = 2.0f,
-                          float persistence = 0.5f) :
-        mFrequency(frequency),
-        mAmplitude(amplitude),
-        mLacunarity(lacunarity),
-        mPersistence(persistence) {
-    }
+	explicit SimplexNoise(int seed = 0,
+		float frequency = 1.0f,
+		float amplitude = 1.0f,
+		float lacunarity = 2.0f,
+		float persistence = 0.5f);
 
 private:
+	int mSeed;
+
     // Parameters of Fractional Brownian Motion (fBm) : sum of N "octaves" of noise
     float mFrequency;   ///< Frequency ("width") of the first octave of noise (default to 1.0)
     float mAmplitude;   ///< Amplitude ("height") of the first octave of noise (default to 1.0)

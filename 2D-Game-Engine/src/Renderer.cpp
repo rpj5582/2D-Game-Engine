@@ -46,6 +46,10 @@ Renderer::Renderer()
 	glDisable(GL_CULL_FACE);
 	glDisable(GL_DEPTH_TEST);
 
+	// Enable blending for transparent sprites
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
 	// Cornflower blue
 	glClearColor(0.392157f, 0.584314f, 0.929412f, 1);
 
@@ -76,6 +80,8 @@ void Renderer::render(const Camera& camera, const Sprite* sprites, size_t sprite
 
 	glBindVertexArray(m_vao);
 
+	glUniform4f(5, 1.0f, 1.0f, 1.0f, 1.0f);
+
 	for (size_t i = 0; i < spriteCount; i++)
 	{
 		// Don't render sprites with no shader
@@ -87,7 +93,6 @@ void Renderer::render(const Camera& camera, const Sprite* sprites, size_t sprite
 		// Build the sprite's world matrix
 		glm::mat4 world = glm::mat4();
 		world = glm::translate(world, glm::vec3(sprites[i].transform.position, 0.0f));
-		world = glm::rotate(world, sprites[i].transform.rotation, glm::vec3(0.0f, 0.0f, 1.0f));
 		world = glm::scale(world, glm::vec3(sprites[i].transform.size, 0.0f));
 
 		// Upload uniforms
@@ -95,8 +100,12 @@ void Renderer::render(const Camera& camera, const Sprite* sprites, size_t sprite
 		glUniformMatrix4fv(1, 1, GL_FALSE, &view[0][0]);
 		glUniformMatrix4fv(2, 1, GL_FALSE, &world[0][0]);
 
+		glm::vec2 uvOffsetScaleFactor = sprites[i].renderData.texture.dimensions / (sprites[i].renderData.tileDimensions - glm::vec2(TEXTURE_SHRINK_FACTOR));
+		glUniform2fv(4, 1, &uvOffsetScaleFactor[0]);
+		glUniform2fv(6, 1, &sprites[i].renderData.uvOffsets[sprites[i].renderData.uvOffsetIndex][0]);
+
 		// Bind the texture
-		glBindTexture(GL_TEXTURE_2D, sprites[i].renderData.textureID);
+		glBindTexture(GL_TEXTURE_2D, sprites[i].renderData.texture.id);
 
 		// Draw the quad
 		glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (void*)0);
@@ -109,6 +118,22 @@ void Renderer::render(const Camera& camera, const Terrain& terrain)
 	const glm::mat4& view = camera.getViewMatrix();
 
 	const Chunk* chunks = terrain.getVisibleChunks();
+
+	AssetManager* assetManager = AssetManager::getInstance();
+	unsigned int terrainShaderID = assetManager->getShader("terrainShader");
+	unsigned int blockSpritesheet = assetManager->getTexture("blockSpritesheet");
+
+	// Use the shader
+	glUseProgram(terrainShaderID);
+
+	// Upload the matrices
+	glUniformMatrix4fv(0, 1, GL_FALSE, &projection[0][0]);
+	glUniformMatrix4fv(1, 1, GL_FALSE, &view[0][0]);
+
+	glUniform4f(5, 1.0f, 1.0f, 1.0f, 1.0f);
+
+	// Bind the texture
+	glBindTexture(GL_TEXTURE_2D, blockSpritesheet);
 
 	for (size_t i = 0; i < CHUNK_VIEW_SIZE; i++)
 	{
@@ -125,18 +150,13 @@ void Renderer::render(const Camera& camera, const Terrain& terrain)
 			if (chunks[i].blockCount[j] == 0) continue;
 
 			// Get the pointer to the start of the blocks we want to render
-			// Offset the sprites array by the previous block's count
-			const Sprite* sprites = chunks[i].sprites + blockCountSum;
-
-			// Use the shader
-			glUseProgram(sprites[0].renderData.shaderID);
+			// Offset the blocks array by the previous block's count
+			const Block* blocks = chunks[i].blocks + blockCountSum;
 
 			// Upload uniforms
-			glUniformMatrix4fv(0, 1, GL_FALSE, &projection[0][0]);
-			glUniformMatrix4fv(1, 1, GL_FALSE, &view[0][0]);
-
-			// Bind the texture
-			glBindTexture(GL_TEXTURE_2D, sprites[0].renderData.textureID);
+			glm::vec2 uvOffsetScaleFactor = blocks[0].sprite.renderData.texture.dimensions / (blocks[0].sprite.renderData.tileDimensions - glm::vec2(TEXTURE_SHRINK_FACTOR));
+			glUniform2fv(4, 1, &uvOffsetScaleFactor[0]);
+			glUniform2fv(6, MAX_ANIMATION_LENGTH, &blocks[0].sprite.renderData.uvOffsets[0][0]);
 
 			// Draw the block using instanced rendering
 			glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (void*)0, chunks[i].blockCount[j], blockCountSum);

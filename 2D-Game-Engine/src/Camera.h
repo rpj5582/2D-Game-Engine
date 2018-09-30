@@ -3,11 +3,17 @@
 #include <glm.hpp>
 #include <gtc/matrix_transform.hpp>
 
+#define CAMERA_VERTICAL_CLAMP 9216
+
 class Camera
 {
 public:
 	Camera(int width, int height);
 	~Camera();
+
+	glm::vec2 getPosition() const;
+	int getWidth() const;
+	int getHeight() const;
 
 	void translate(glm::vec2 delta);
 	void resize(int width, int height);

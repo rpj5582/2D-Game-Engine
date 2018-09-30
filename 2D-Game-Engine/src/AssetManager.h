@@ -2,7 +2,6 @@
 
 #include <GL/glew.h>
 #include <FreeImage.h>
-#include <unordered_map>
 
 class AssetManager
 {

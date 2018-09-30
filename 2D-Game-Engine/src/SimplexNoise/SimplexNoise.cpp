@@ -69,7 +69,7 @@ static inline int32_t fastfloor(float fp) {
  * A vector-valued noise over 3D accesses it 96 times, and a
  * float-valued 4D noise 64 times. We want this to fit in the cache!
  */
-static const uint8_t perm[256] = {
+static uint8_t perm[256] = {
     151, 160, 137, 91, 90, 15,
     131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23,
     190, 6, 148, 247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32, 57, 177, 33,
@@ -473,4 +473,17 @@ float SimplexNoise::fractal(size_t octaves, float x, float y, float z) const {
     }
 
     return (output / denom);
+}
+
+SimplexNoise::SimplexNoise(int seed, float frequency, float amplitude, float lacunarity, float persistence) :
+	mSeed(seed),
+	mFrequency(frequency),
+	mAmplitude(amplitude),
+	mLacunarity(lacunarity),
+	mPersistence(persistence)
+{
+	std::srand(seed);
+	std::random_shuffle(perm, perm + 257, [](int max){
+		return rand() % max;
+	});
 }

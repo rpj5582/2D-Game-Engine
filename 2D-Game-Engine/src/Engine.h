@@ -2,6 +2,8 @@
 
 #include "AssetManager.h"
 #include "Renderer.h"
+#include "PlayerController.h"
+#include "CollisionHandler.h"
 
 class Engine
 {
@@ -17,7 +19,7 @@ private:
 	AssetManager* m_assetManager;
 	Renderer* m_renderer;
 	Terrain* m_terrain;
-
 	Camera* m_camera;
-	std::vector<Sprite> m_sprites;
+	PlayerController* m_playerController;
+	CollisionHandler* m_collisionHandler;
 };
