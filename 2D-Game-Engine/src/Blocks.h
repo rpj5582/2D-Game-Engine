@@ -4,14 +4,17 @@
 #include "Sprite.h"
 
 #define BLOCK_SIZE 16 // The size of a block in pixels
-#define BLOCK_COUNT 4 // The number of different blocks
+#define BLOCK_COUNT 7 // The number of different blocks
 
 enum BlockType
 {
 	AIR,
 	DIRT,
 	GRASS,
-	STONE
+	STONE,
+	WOOD,
+	BRANCH,
+	LEAF
 };
 
 class BlockContainer

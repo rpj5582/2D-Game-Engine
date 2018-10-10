@@ -4,23 +4,26 @@
 #include "Renderer.h"
 #include "AssetManager.h"
 
-Terrain::Terrain(int seed, const Camera& camera, unsigned int vertexBufferID, unsigned int indexBufferID) : m_camera(camera)
+#define _USE_MATH_DEFINES
+#include <math.h>  
+
+#include "Input.h"
+
+Terrain::Terrain(const Camera& camera, unsigned int vertexBufferID, unsigned int indexBufferID) : m_camera(camera)
 {
-	m_seed = seed;
+	m_terrainNoise = new SimplexNoise(0.25f);
+	m_treeNoise = new SimplexNoise(4.0f, 0.25f);
 
-	m_noise = new SimplexNoise(m_seed, 0.25f);
-	m_visibleChunks = new Chunk[CHUNK_VIEW_SIZE];
-
-	memset(m_visibleChunks, 0, sizeof(Chunk) * CHUNK_VIEW_SIZE);
+	memset(m_chunkContainers, 0, sizeof(ChunkContainer) * CHUNK_CONTAINER_SIZE);
 
 	glm::vec2 worldPositions[CHUNK_SIZE * CHUNK_SIZE] = {};
 	unsigned int uvOffsetIndices[CHUNK_SIZE * CHUNK_SIZE] = {};
 
-	for (unsigned int i = 0; i < CHUNK_VIEW_SIZE; i++)
+	for (unsigned int i = 0; i < CHUNK_CONTAINER_SIZE; i++)
 	{
 		// VAO
-		glGenVertexArrays(1, &m_visibleChunks[i].vao);
-		glBindVertexArray(m_visibleChunks[i].vao);
+		glGenVertexArrays(1, &m_chunkContainers[i].vao);
+		glBindVertexArray(m_chunkContainers[i].vao);
 
 		// Vertices and indices
 		glBindBuffer(GL_ARRAY_BUFFER, vertexBufferID);
@@ -33,8 +36,8 @@ Terrain::Terrain(int seed, const Camera& camera, unsigned int vertexBufferID, un
 		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(sizeof(float) * 2));
 
 		// World positions
-		glGenBuffers(1, &m_visibleChunks[i].worldPositionsVBO);
-		glBindBuffer(GL_ARRAY_BUFFER, m_visibleChunks[i].worldPositionsVBO);
+		glGenBuffers(1, &m_chunkContainers[i].worldPositionsVBO);
+		glBindBuffer(GL_ARRAY_BUFFER, m_chunkContainers[i].worldPositionsVBO);
 		glBufferData(GL_ARRAY_BUFFER, sizeof(glm::vec2) * CHUNK_SIZE * CHUNK_SIZE, &worldPositions[0][0], GL_STREAM_DRAW);
 
 		glEnableVertexAttribArray(2);
@@ -42,8 +45,8 @@ Terrain::Terrain(int seed, const Camera& camera, unsigned int vertexBufferID, un
 		glVertexAttribDivisor(2, 1);
 
 		// UV offset indices
-		glGenBuffers(1, &m_visibleChunks[i].uvOffsetIndicesVBO);
-		glBindBuffer(GL_ARRAY_BUFFER, m_visibleChunks[i].uvOffsetIndicesVBO);
+		glGenBuffers(1, &m_chunkContainers[i].uvOffsetIndicesVBO);
+		glBindBuffer(GL_ARRAY_BUFFER, m_chunkContainers[i].uvOffsetIndicesVBO);
 		glBufferData(GL_ARRAY_BUFFER, sizeof(unsigned int) * CHUNK_SIZE * CHUNK_SIZE, &uvOffsetIndices[0], GL_STREAM_DRAW);
 		
 		glEnableVertexAttribArray(3);
@@ -51,33 +54,57 @@ Terrain::Terrain(int seed, const Camera& camera, unsigned int vertexBufferID, un
 		glVertexAttribDivisor(3, 1);
 	}
 
-	m_caveWorm = genCaveWorm({ 0, 0 });
 	genStartingChunks(camera.getPosition());
 }
 
 Terrain::~Terrain()
 {
-	for (size_t i = 0; i < CHUNK_VIEW_SIZE; i++)
+	for (size_t i = 0; i < CHUNK_CONTAINER_SIZE; i++)
 	{
-		glDeleteBuffers(1, &m_visibleChunks[i].worldPositionsVBO);
-		glDeleteBuffers(1, &m_visibleChunks[i].uvOffsetIndicesVBO);
-		glDeleteVertexArrays(1, &m_visibleChunks[i].vao);
+		glDeleteBuffers(1, &m_chunkContainers[i].worldPositionsVBO);
+		glDeleteBuffers(1, &m_chunkContainers[i].uvOffsetIndicesVBO);
+		glDeleteVertexArrays(1, &m_chunkContainers[i].vao);
 	}
 
-	delete[] m_visibleChunks;
-	delete m_noise;
-	delete[] m_caveWorm;
+	// Waits for the threads to finish
+	for (size_t i = 0; i < m_genChunkThreads.size(); i++)
+	{
+		if (m_genChunkThreads[i].valid())
+			m_genChunkThreads[i].wait();
+	}
+
+	for (size_t i = 0; i < m_postGenThreads.size(); i++)
+	{
+		if (m_postGenThreads[i].valid())
+			m_postGenThreads[i].wait();
+	}
+
+	m_genChunkThreads.clear();
+	m_postGenThreads.clear();
+
+	m_queuedChunksToGen.clear();
+
+	unloadChunks();
+
+	delete m_terrainNoise;
+	delete m_treeNoise;
 }
 
 void Terrain::update()
 {
-	// Check if the camera has moved outside of the visible chunk range and new chunks should be generated
+	// Check if the camera has moved outside of the visible chunk range and the chunk containers should be shifted
+	checkShiftChunkContainers();
+
+	// Check if chunks should be generated
 	checkGenChunks();
+
+	// Check for chunks that are too far away from the player and should be unloaded
+	checkUnloadChunks();
 
 	// TEMP - animate grass
 	/*for (size_t k = 0; k < CHUNK_VIEW_SIZE; k++)
 	{
-		Chunk& chunk = m_visibleChunks[k];
+		Chunk& chunk = m_chunkContainers[k];
 
 		for (size_t j = 0; j < CHUNK_SIZE; j++)
 		{
@@ -96,137 +123,183 @@ void Terrain::update()
 
 	// Generate chunks in the queue
 	genChunks();
-}
 
-std::vector<Chunk*> Terrain::getCollidingChunks(const Sprite& sprite)
-{
-	glm::vec2 position = sprite.transform.position;
+	// Check if any threads have finished and remove them
+	checkThreadsFinished();
 
-	glm::vec2 minPosition = position - sprite.transform.size / 2.0f;
-	glm::vec2 maxPosition = position + sprite.transform.size / 2.0f;
-
-	glm::vec2 minChunkPosition = worldToChunkCoords(minPosition);
-	glm::vec2 maxChunkPosition = worldToChunkCoords(maxPosition);
-
-	glm::vec2 chunkOriginPosition = worldToChunkCoords(m_chunkOriginWorldPos);
-
-	std::vector<Chunk*> intersectingChunks;
-	for (int j = (int)minChunkPosition.y; j <= maxChunkPosition.y; j++)
+	if (Input::getInstance()->isKeyPressed(GLFW_KEY_R))
 	{
-		for (int i = (int)minChunkPosition.x; i <= maxChunkPosition.x; i++)
-		{
-			for (unsigned int k = 0; k < CHUNK_VIEW_SIZE; k++)
-			{
-				glm::vec2 chunkPos = glm::vec2(chunkOriginPosition.x + k % (CHUNK_VIEW_DISTANCE + 1), chunkOriginPosition.y + k / (CHUNK_VIEW_DISTANCE + 1));
-				if (chunkPos.x == i && chunkPos.y == j)
-				{
-					Chunk* chunk = m_visibleChunkMap[k];
-					bool alreadyIntersecting = false;
-					for (size_t n = 0; n < intersectingChunks.size(); n++)
-					{
-						if (intersectingChunks[n] == chunk)
-						{
-							alreadyIntersecting = true;
-							break;
-						}
-					}
-
-					if(!alreadyIntersecting)
-						intersectingChunks.push_back(chunk);
-
-					break;
-				}
-			}
-		}
+		genStartingChunks(m_camera.getPosition());
 	}
 
-	return intersectingChunks;
+	if (Input::getInstance()->isKeyPressed(GLFW_KEY_F))
+	{
+		for (size_t i = 0; i < CHUNK_CONTAINER_SIZE; i++)
+		{
+			if (m_chunkContainers[i].chunk->hasFullyLoaded)
+				updateDrawingBuffers(i);
+		}
+	}		
 }
 
-Chunk* Terrain::getVisibleChunks() const
+//std::vector<ChunkContainer*> Terrain::getCollidingChunks(const Sprite& sprite)
+//{
+//	glm::vec2 position = sprite.transform.position;
+//
+//	glm::vec2 minPosition = position - sprite.transform.size / 2.0f;
+//	glm::vec2 maxPosition = position + sprite.transform.size / 2.0f;
+//
+//	glm::vec2 minChunkPosition = worldToChunkCoords(minPosition);
+//	glm::vec2 maxChunkPosition = worldToChunkCoords(maxPosition);
+//
+//	glm::vec2 chunkOriginPosition = worldToChunkCoords(m_chunkOriginWorldPos);
+//
+//	std::vector<ChunkContainer*> intersectingChunks;
+//	for (int j = (int)minChunkPosition.y; j <= maxChunkPosition.y; j++)
+//	{
+//		for (int i = (int)minChunkPosition.x; i <= maxChunkPosition.x; i++)
+//		{
+//			for (unsigned int k = 0; k < CHUNK_CONTAINER_SIZE; k++)
+//			{
+//				glm::vec2 chunkPos = glm::vec2(chunkOriginPosition.x + k % (CHUNK_CONTAINER_DISTANCE + 1), chunkOriginPosition.y + k / (CHUNK_CONTAINER_DISTANCE + 1));
+//				if (chunkPos.x == i && chunkPos.y == j)
+//				{
+//					ChunkContainer* chunk = m_chunkContainerMap[k];
+//					bool alreadyIntersecting = false;
+//					for (size_t n = 0; n < intersectingChunks.size(); n++)
+//					{
+//						if (intersectingChunks[n] == chunk)
+//						{
+//							alreadyIntersecting = true;
+//							break;
+//						}
+//					}
+//
+//					if(!alreadyIntersecting)
+//						intersectingChunks.push_back(chunk);
+//
+//					break;
+//				}
+//			}
+//		}
+//	}
+//
+//	return intersectingChunks;
+//}
+
+const ChunkContainer* Terrain::getChunkContainers() const
 {
-	return m_visibleChunks;
+	return m_chunkContainers;
+}
+
+Chunk* Terrain::createChunk(glm::vec2 chunkPosition)
+{
+	if (m_chunks.find(chunkPosition) == m_chunks.end())
+	{
+		Chunk* chunk = new Chunk(chunkPosition);
+		m_chunks[chunk->chunkPosition] = chunk;
+
+		memset(chunk->blocks, 0, CHUNK_SIZE * CHUNK_SIZE);
+		memset(chunk->blockCount, 0, BLOCK_COUNT);
+
+		chunk->chunkType = CHUNK_AIR;
+		chunk->containerIndex = -1;
+		chunk->hasWormHead = false;
+		chunk->hasGenerated = false;
+		chunk->hasFullyLoaded = false;
+
+		return chunk;
+	}
+	else
+	{
+		Output::error("ERROR: Tried to create chunk at X: " + std::to_string(chunkPosition.x) + ", Y: " + std::to_string(chunkPosition.y) + " but a chunk already exists there.");
+		return nullptr;
+	}
 }
 
 void Terrain::genStartingChunks(glm::vec2 startingPosition)
 {
-	m_visibleChunkMap.clear();
+	// Deletes any old chunks for a fresh start
+	unloadChunks();
 
 	glm::vec2 offset = worldToChunkCoords(startingPosition);
 
-	// Calculates the bottom left origin of the visible chunks
-	m_chunkOriginWorldPos = chunkToWorldCoords(offset) - glm::vec2(CHUNK_SIZE * BLOCK_SIZE * (CHUNK_VIEW_DISTANCE / 2.0f));
+	// Calculates the bottom left origin of the chunk containers
+	m_chunkContainerOriginWorldPos = chunkToWorldCoords(offset) - glm::vec2(CHUNK_SIZE * BLOCK_SIZE * (CHUNK_CONTAINER_DISTANCE / 2.0f));
 
-	int initialY = (int)(offset.y + (-CHUNK_VIEW_DISTANCE / 2.0f));
-	int initialX = (int)(offset.x + (-CHUNK_VIEW_DISTANCE / 2.0f));
+	int initialY = (int)(offset.y + (-CHUNK_CONTAINER_DISTANCE / 2.0f));
+	int initialX = (int)(offset.x + (-CHUNK_CONTAINER_DISTANCE / 2.0f));
 
-	// Collect the chunk info for each chunk to generate (what its world position is and where to store it in the array)
-	std::vector<std::pair<glm::vec2, Chunk*>> chunkInfo;
+	// Create empty chunks that need to be generated
+	std::vector<Chunk*> startingChunks;
 	unsigned int index = 0;
-	for (int y = initialY; y <= CHUNK_VIEW_DISTANCE / 2.0f; y++)
+	for (int y = initialY; y < initialY + (CHUNK_CONTAINER_DISTANCE + 1); y++)
 	{
-		for (int x = initialX; x <= CHUNK_VIEW_DISTANCE / 2.0f; x++)
+		for (int x = initialX; x < initialX + (CHUNK_CONTAINER_DISTANCE + 1); x++)
 		{
-			Chunk* chunk = &m_visibleChunks[index];
-			glm::vec2 chunkWorldPosition = chunkToWorldCoords(glm::vec2(x, y));
+			Chunk* chunk = createChunk(glm::vec2(x, y));
+			chunk->containerIndex = index;
 
-			chunkInfo.push_back({ chunkWorldPosition, chunk });
+			ChunkContainer& chunkContainer = m_chunkContainers[index];
+			chunkContainer.chunk = chunk;
 
-			m_visibleChunkMap[index] = chunk;
+			startingChunks.push_back(chunk);
 			index++;
 		}
 	}
 
 	// Adds the chunk info to the queue
-	queueGenChunks(chunkInfo);
+	queueGenChunks(startingChunks);
 }
 
 void Terrain::genChunks()
 {
-	// Take some chunk info from the queue and start a thread to generate the chunk
-	if (m_chunkInfo.size() > 0)
 	{
-		std::pair<glm::vec2, Chunk*> chunkInfo = m_chunkInfo.front();
+		std::unique_lock<std::mutex> lock(m_genQueueMutex);
 
-		// Generate the chunk in its own thread
-		m_genChunkThreads.push_back(std::async(std::launch::async, &Terrain::genChunkThreaded, this, chunkInfo.first, chunkInfo.second));
-		
-		// Remove the chunk info from the queue
-		m_chunkInfo.erase(m_chunkInfo.begin());
-	}	
-
-	// Check if each thread is done
-	for (size_t i = 0; i < m_genChunkThreads.size(); i++)
-	{
-		if (m_genChunkThreads[i].wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		// Take some chunk info from the queue and start a thread to generate the chunk
+		if (m_queuedChunksToGen.size() > 0)
 		{
-			// If the thread is done, update the world positions and uv offset indices for rendering
-			const Chunk* chunk = m_genChunkThreads[i].get();
-			updateWorldPositions(chunk);
-			updateUVOffsetIndices(chunk);
+			Chunk* chunk = m_queuedChunksToGen.front();
 
-			// Thread is done, remove it from the list
-			m_genChunkThreads.erase(m_genChunkThreads.begin() + i);
+			// Generate the chunk in its own thread
+			m_genChunkThreads.push_back(std::async(std::launch::async, &Terrain::genChunkThreaded, this, chunk));
+
+			// Remove the chunk info from the queue
+			m_queuedChunksToGen.erase(m_queuedChunksToGen.begin());
 		}
 	}
 }
 
-void Terrain::queueGenChunks(const std::vector<std::pair<glm::vec2, Chunk*>>& chunkInfo)
+void Terrain::queueGenChunk(Chunk* chunk)
 {
-	m_chunkInfo.insert(m_chunkInfo.end(), chunkInfo.begin(), chunkInfo.end());
+	std::unique_lock<std::mutex> lock(m_genQueueMutex);
+	m_queuedChunksToGen.push_back(chunk);
 }
 
-Chunk* Terrain::genChunkThreaded(glm::vec2 chunkWorldPosition, Chunk* chunk)
+void Terrain::queueGenChunks(const std::vector<Chunk*>& chunks)
 {
+	std::unique_lock<std::mutex> lock(m_genQueueMutex);
+	m_queuedChunksToGen.insert(m_queuedChunksToGen.end(), chunks.begin(), chunks.end());
+}
+
+Chunk* Terrain::genChunkThreaded(Chunk* chunk)
+{
+	glm::vec2 chunkWorldPosition = chunkToWorldCoords(chunk->chunkPosition);
+
 	// Allocate memory to put the generated chunk into
 	Block* blocks = new Block[CHUNK_SIZE * CHUNK_SIZE];
 	unsigned int blockCount[BLOCK_COUNT] = {};
 
-	// Calculate the surface height values
+	// Allocate memory for the block index map
+	unsigned int blockIndexMap[CHUNK_SIZE * CHUNK_SIZE];
+
+	
 	int surfaceHeights[CHUNK_SIZE];
 	for (size_t i = 0; i < CHUNK_SIZE; i++)
 	{
-		surfaceHeights[i] = (int)(roundf(m_noise->fractal(SURFACE_OCTAVES, (chunkWorldPosition.x + i * BLOCK_SIZE + 1) / SMOOTHNESS) * HEIGHT_FLUX / BLOCK_SIZE) * BLOCK_SIZE);
+		// Calculate the surface height values
+		surfaceHeights[i] = calculateSurfaceHeight(chunkWorldPosition.x, i);
 	}
 
 	for (size_t j = 0; j < CHUNK_SIZE; j++)
@@ -241,16 +314,18 @@ Chunk* Terrain::genChunkThreaded(glm::vec2 chunkWorldPosition, Chunk* chunk)
 
 			size_t blockIndex = i + j * CHUNK_SIZE;
 
+			blockIndexMap[blockIndex] = (unsigned int)blockIndex;
+
 			// Cache the surface height
 			int surfaceHeight = surfaceHeights[i];
 
 			// Generate the stone value
-			int stoneValue = (int)roundf(m_noise->fractal(STONE_OCTAVES, (blockX + 1) / SMOOTHNESS, (blockY + 1) / SMOOTHNESS) * STONE_FLUX / BLOCK_SIZE) * BLOCK_SIZE;
+			int stoneValue = (int)roundf(m_terrainNoise->fractal(STONE_OCTAVES, (blockX + 1) / SMOOTHNESS, (blockY + 1) / SMOOTHNESS) * STONE_FLUX / BLOCK_SIZE) * BLOCK_SIZE;
 
 			// Add a grass block if the we're at the surface value
 			if (blockY == surfaceHeight)
 			{
-				setBlock(blocks[blockIndex], GRASS, chunkWorldPosition + glm::vec2(i * BLOCK_SIZE, j * BLOCK_SIZE), 2);
+				setBlock(blocks[blockIndex], GRASS, chunkWorldPosition + glm::vec2(i * BLOCK_SIZE, j * BLOCK_SIZE), 3);
 				blockCount[GRASS]++;
 			}
 			else if (blockY < surfaceHeight) // Else add a block if the we're below the surface value
@@ -282,30 +357,90 @@ Chunk* Terrain::genChunkThreaded(glm::vec2 chunkWorldPosition, Chunk* chunk)
 	else if (chunkWorldPosition.y + CHUNK_SIZE * BLOCK_SIZE < 0)
 		isUndergroundChunk = true;
 
-	ChunkType chunkType = isAirChunk ? CHUNK_AIR : (isUndergroundChunk ? CHUNK_UNDERGROUND : CHUNK_SURFACE);
-
-	// Update grass
-	//updateGrassBlocks(chunkWorldPosition, blocks);
-
-	// Generate cave
-	genCave(chunkType, blocks, blockCount, chunkWorldPosition);
-
-	// Sort the chunk's blocks
-	std::sort(blocks, blocks + CHUNK_SIZE * CHUNK_SIZE, [](const Block& block1, const Block &block2)
+	ChunkType chunkType;
+	if (isAirChunk)
 	{
-		return block1.blockType < block2.blockType;
-	});
+		chunkType = CHUNK_AIR;
+	}
+	else if (isUndergroundChunk)
+	{
+		chunkType = CHUNK_UNDERGROUND;
+
+		// Generate cave
+		genCave(blocks, blockCount, chunkWorldPosition);
+	}
+	else
+	{
+		chunkType = CHUNK_SURFACE;
+
+		// Update grass
+		//updateGrassBlocks(chunkWorldPosition, blocks);
+	}
+
+	// Sort the chunk's block index map so that we can keep the blocks unsorted for later modification,
+	// but still be able to copy them to the drawing buffers in sorted way.
+	sortBlockIndexMap(blocks, blockIndexMap);
+
+	float noiseValue = SimplexNoise::noise(chunkWorldPosition.x / SMOOTHNESS, chunkWorldPosition.y / SMOOTHNESS);
 
 	// Now that the chunk has been generated, copy it to the appropriate chunk reference
-	m_mutex.lock();
+	chunk->mutex.lock();
+
+	// Check to see if this chunk should have a cave worm head for cave entrance generation
+	if (chunkType == CHUNK_SURFACE)
+	{
+		if (abs(noiseValue) > 0.75f)
+			chunk->hasWormHead = true;
+	}
+	
 	memcpy_s(chunk->blocks, sizeof(Block) * CHUNK_SIZE * CHUNK_SIZE, blocks, sizeof(Block) * CHUNK_SIZE * CHUNK_SIZE);
+	memcpy_s(chunk->blockIndexMap, sizeof(unsigned int) * CHUNK_SIZE * CHUNK_SIZE, blockIndexMap, sizeof(unsigned int) * CHUNK_SIZE * CHUNK_SIZE);
 	memcpy_s(chunk->blockCount, sizeof(unsigned int) * BLOCK_COUNT, blockCount, sizeof(unsigned int) * BLOCK_COUNT);
 	chunk->chunkType = chunkType;
-	chunk->hasLoaded = true;
-	m_mutex.unlock();
+	chunk->hasGenerated = true;
+	chunk->mutex.unlock();
+
+	chunk->cv.notify_all();
 
 	delete[] blocks;
 	return chunk;
+}
+
+std::vector<Chunk*> Terrain::postGenChunkThreaded(Chunk* chunk)
+{
+	// The original chunk needs to be included in the list of modified chunks, even if it wasn't modified,
+	// so that it can be marked as fully generated later
+	std::vector<Chunk*> modifiedChunks{chunk};
+
+	// Check if the chunk should generate a cave worm
+	if (chunk->hasWormHead)
+	{
+		std::vector<Chunk*> caveWormModifiedChunks = genCaveWorm(chunk->chunkPosition);
+		modifiedChunks.insert(modifiedChunks.end(), caveWormModifiedChunks.begin(), caveWormModifiedChunks.end());
+	}
+
+	// Check to see if we should generate trees
+	if (chunk->chunkType == CHUNK_SURFACE)
+	{
+		std::vector<Chunk*> treeModifiedChunks = genTrees(chunk);
+		modifiedChunks.insert(modifiedChunks.end(), treeModifiedChunks.begin(), treeModifiedChunks.end());
+	}
+
+	// Remove duplicate modified chunks
+	std::sort(modifiedChunks.begin(), modifiedChunks.end());
+	modifiedChunks.erase(std::unique(modifiedChunks.begin(), modifiedChunks.end()), modifiedChunks.end());
+
+	return modifiedChunks;
+}
+
+void Terrain::unloadChunks()
+{
+	for (auto it = m_chunks.begin(); it != m_chunks.end(); it++)
+	{
+		delete it->second;
+	}
+
+	m_chunks.clear();
 }
 
 void Terrain::updateGrassBlocks(glm::vec2 chunkWorldPosition, Block* blocks)
@@ -343,365 +478,800 @@ void Terrain::updateGrassBlocks(glm::vec2 chunkWorldPosition, Block* blocks)
 	}
 }
 
-void Terrain::genCave(ChunkType chunkType, Block* blocks, unsigned int blockCount[BLOCK_COUNT], glm::vec2 chunkWorldPosition)
+void Terrain::genCave(Block* blocks, unsigned int blockCount[BLOCK_COUNT], glm::vec2 chunkWorldPosition)
 {
-	/*if (chunkType == CHUNK_UNDERGROUND)
+	for (size_t j = 0; j < CHUNK_SIZE; j++)
 	{
-		for (size_t j = 0; j < CHUNK_SIZE; j++)
+		int blockY = (int)(chunkWorldPosition.y + j * BLOCK_SIZE);
+
+		for (size_t i = 0; i < CHUNK_SIZE; i++)
 		{
-			int blockY = (int)(chunkWorldPosition.y + j * BLOCK_SIZE);
+			int blockX = (int)(chunkWorldPosition.x + i * BLOCK_SIZE);
 
-			for (size_t i = 0; i < CHUNK_SIZE; i++)
+			float caveNoise = (m_terrainNoise->fractal(2, blockX * (1.0f / CHUNK_SIZE / 2.0f), blockY * (1.0f / CHUNK_SIZE / 2.0f)));
+			float caveCutoff = 1 - abs(chunkWorldPosition.y * 2 / (TERRAIN_CHUNK_HEIGHT * CHUNK_SIZE * BLOCK_SIZE)) - 0.2f;
+			caveCutoff = fmaxf(caveCutoff, -0.25f);
+			if (caveNoise > caveCutoff)
 			{
-				int blockX = (int)(chunkWorldPosition.x + i * BLOCK_SIZE);
+				size_t blockIndex = i + CHUNK_SIZE * j;
+				blockCount[blocks[blockIndex].blockType]--;
+				setBlock(blocks[blockIndex], AIR, blocks[blockIndex].sprite.transform.position, 0);
+				blockCount[AIR]++;
+			}
+		}
+	}
+}
 
-				float caveNoise = m_noise->fractal(2, blockX * (1.0f / CHUNK_SIZE / 2.0f), blockY * (1.0f / CHUNK_SIZE / 2.0f));
-				if (caveNoise < 0.1f)
+std::vector<Chunk*> Terrain::genCaveWorm(glm::vec2 chunkPosition)
+{
+	std::vector<Chunk*> modifiedChunks;
+
+	glm::vec2 chunkWorldPosition = chunkToWorldCoords(chunkPosition);
+
+	// Create the worm and set its starting point
+	CaveWorm worm;
+	worm.headNoisePosition.x = SimplexNoise::noise(chunkWorldPosition.x / SMOOTHNESS);
+	worm.headNoisePosition.y = SimplexNoise::noise(chunkWorldPosition.y / SMOOTHNESS);
+	worm.headChunkPosition = chunkPosition;
+
+	// Set the worms max length
+	float wormNoiseMaxLength = SimplexNoise::noise(chunkPosition.x, chunkPosition.y);
+	worm.length = (size_t)roundf(map(wormNoiseMaxLength, -1, 1, CAVE_WORM_LENGTH_MIN, CAVE_WORM_LENGTH_MAX));
+
+	// Chooses a random block within the chunk to start the worm
+	float wormStartX = SimplexNoise::noise(chunkWorldPosition.x + 0.1f / SMOOTHNESS, chunkWorldPosition.y + 0.1f / SMOOTHNESS, 0.16f);
+	float wormStartY = SimplexNoise::noise(chunkWorldPosition.x + 0.1f / SMOOTHNESS, chunkWorldPosition.y + 0.1f / SMOOTHNESS, 0.64f);
+
+	wormStartX = (float)(int)(map(wormStartX, -1, 1, chunkWorldPosition.x, chunkWorldPosition.x + CHUNK_SIZE * BLOCK_SIZE));
+	wormStartY = (float)(int)(map(wormStartY, -1, 1, chunkWorldPosition.y, chunkWorldPosition.y + CHUNK_SIZE * BLOCK_SIZE));
+
+	// Snaps starting world position to grid
+	glm::vec2 wormStartPosition = snapToBlockGrid(glm::vec2(wormStartX, wormStartY));
+	glm::vec2 wormCurrentPosition = wormStartPosition;
+
+	glm::vec3 currentNoisePosition = worm.headNoisePosition;
+
+	Chunk* chunk = nullptr;
+	for (size_t i = 0; i < worm.length; i++)
+	{
+		// Gets the chunk that the current position is in (might be different)
+		glm::vec2 currentChunkPosition = worldToChunkCoords(wormCurrentPosition);
+		auto chunkIt = m_chunks.find(currentChunkPosition);
+		if (chunkIt == m_chunks.end())
+		{			
+			// Need to wait and generate the chunk for the worm to continue through
+			chunk = createChunk(currentChunkPosition);
+			modifiedChunks.push_back(chunk);
+
+			queueGenChunk(chunk);
+			
+			std::unique_lock<std::mutex> lock(chunk->mutex);
+			chunk->cv.wait(lock); // Waits for the chunk to be fully generated
+		}
+		else
+		{
+			// Check if the chunk the worm is in has changed
+			if (chunk != chunkIt->second)
+			{
+				chunk = chunkIt->second;
+				if (std::find(modifiedChunks.begin(), modifiedChunks.end(), chunk) == modifiedChunks.end())
 				{
-					size_t blockIndex = i + CHUNK_SIZE * j;
-					blockCount[blocks[blockIndex].blockType]--;
-					setBlock(blocks[blockIndex], AIR, blocks[blockIndex].sprite.transform.position, 0);
-					blockCount[AIR]++;
+					modifiedChunks.push_back(chunk);
+				}
+			}
+
+			std::unique_lock<std::mutex> lock(chunk->mutex);
+			if (!chunk->hasGenerated) // Chunk exists, but hasn't fully generated yet
+			{
+				chunk->cv.wait(lock); // Waits for the chunk to be fully generated
+			}
+		}
+
+		float wormWidthNoise = SimplexNoise::noise((float)i / worm.length / SMOOTHNESS, currentNoisePosition.y / SMOOTHNESS);
+		int wormRadius = (int)roundf(map(wormWidthNoise, -1, 1, CAVE_WORM_RADIUS_MIN, CAVE_WORM_RADIUS_MAX));
+
+		// Convert the current position to block coordinates
+		glm::vec2 currentChunkWorldPosition = chunkToWorldCoords(currentChunkPosition);
+		glm::vec2 blockWorldDelta = wormCurrentPosition - currentChunkWorldPosition;
+		glm::vec2 blockIndices = (glm::vec2((int)(blockWorldDelta.x / BLOCK_SIZE) % CHUNK_SIZE, (int)(blockWorldDelta.y / BLOCK_SIZE) % CHUNK_SIZE));
+
+		{
+			// Take ownership of the chunk while carving out the worm
+			std::unique_lock<std::mutex> lock(chunk->mutex);
+
+			for (ptrdiff_t j = -wormRadius; j <= wormRadius; j++)
+			{
+				for (ptrdiff_t k = -wormRadius; k <= wormRadius; k++)
+				{
+					glm::vec2 currentBlockIndices = blockIndices + glm::vec2(k, j);
+					
+					// Check if these indices are within the worm radius
+					if ((currentBlockIndices.x - blockIndices.x) * (currentBlockIndices.x - blockIndices.x) +
+						(currentBlockIndices.y - blockIndices.y) * (currentBlockIndices.y - blockIndices.y) <= wormRadius * wormRadius)
+					{
+						// Skip this block if it's not within the chunk
+						if (currentBlockIndices.x < 0 || currentBlockIndices.x >= CHUNK_SIZE ||
+							currentBlockIndices.y < 0 || currentBlockIndices.y >= CHUNK_SIZE) continue;
+
+						Block& block = chunk->blocks[(int)currentBlockIndices.x + (int)currentBlockIndices.y * CHUNK_SIZE];
+
+						chunk->blockCount[block.blockType]--;
+						setBlock(block, AIR, block.sprite.transform.position, 0);
+						chunk->blockCount[AIR]++;
+					}
 				}
 			}
 		}
-	}*/
 
-	for (size_t i = 0; i < m_caveWormLength; i++)
-	{
-		glm::vec2 caveWormSegment = m_caveWorm[i];
-		if (caveWormSegment.x >= chunkWorldPosition.x && caveWormSegment.x < chunkWorldPosition.x + CHUNK_SIZE * BLOCK_SIZE &&
-			caveWormSegment.y >= chunkWorldPosition.y && caveWormSegment.y < chunkWorldPosition.y + CHUNK_SIZE * BLOCK_SIZE)
+		// Get the next worm position
+		currentNoisePosition.x = worm.headNoisePosition.x + (i * 0.16f);
+		currentNoisePosition.y = worm.headNoisePosition.y + (i * 0.64f);
+
+		float noiseValue = SimplexNoise::noise(currentNoisePosition.x, currentNoisePosition.y, currentNoisePosition.z);
+		glm::vec2 nextPosition;
+		if (noiseValue <= -0.25f)
 		{
-			glm::vec2 chunkPosition = worldToChunkCoords(caveWormSegment);
-			glm::vec2 localBlockPosition = caveWormSegment - glm::vec2(chunkPosition.x * CHUNK_SIZE * BLOCK_SIZE, chunkPosition.y * CHUNK_SIZE * BLOCK_SIZE);
-			localBlockPosition /= 16.0f;
-			size_t blockIndex = (size_t)(localBlockPosition.x + CHUNK_SIZE * localBlockPosition.y);
-
-			blockCount[blocks[blockIndex].blockType]--;
-			setBlock(blocks[blockIndex], AIR, blocks[blockIndex].sprite.transform.position, 0);
-			blockCount[AIR]++;
+			nextPosition = glm::vec2(0, -16);
 		}
-		else
-			break;
-	}
-}
-
-glm::vec2* Terrain::genCaveWorm(glm::vec2 startChunkWorldPosition)
-{
-	float wormMaxLength = SimplexNoise::noise(m_seed + 0.1f / SMOOTHNESS);
-	m_caveWormLength = (size_t)(map(wormMaxLength, -1, 1, CAVE_WORM_LENGTH_MIN, CAVE_WORM_LENGTH_MAX));
-
-	glm::vec2* wormPositions = new glm::vec2[(size_t)m_caveWormLength];
-
-	// Chooses a random block within the chunk to start the worm
-	//float wormStartX = SimplexNoise::noise(startChunkWorldPosition.x + 0.1f / SMOOTHNESS);
-	//float wormStartY = SimplexNoise::noise(startChunkWorldPosition.y + 0.1f / SMOOTHNESS);
-
-	//wormStartX = (float)(int)(map(wormStartX, -1, 1, startChunkWorldPosition.x, startChunkWorldPosition.x + CHUNK_SIZE * BLOCK_SIZE));
-	//wormStartY = (float)(int)(map(wormStartY, -1, 1, startChunkWorldPosition.y, startChunkWorldPosition.y + CHUNK_SIZE * BLOCK_SIZE));
-
-	//glm::vec2 wormStart = snapToBlockGrid(glm::vec2(wormStartX, wormStartY)); // Snaps starting world position to grid
-	
-	/*glm::vec2 wormStart = glm::vec2(-1024.0f);
-	
-	glm::vec2 wormCurrent = wormStart;
-
-	SimplexNoise noiseX = SimplexNoise((int)(m_seed / 2.0f - wormStart.x), 0.15f, 2.0f);
-	SimplexNoise noiseY = SimplexNoise((int)(m_seed / 4.0f + wormStart.y + 384.0f), 0.15f, 2.0f);
-
-	wormPositions[0] = wormStart;
-	for (size_t i = 1; i < m_caveWormLength; i++)
-	{
-		float x = noiseX.fractal(2, wormCurrent.x / SMOOTHNESS, wormCurrent.y / SMOOTHNESS);
-		if (x >= 0)
-			wormCurrent.x += BLOCK_SIZE;
-		else
-			wormCurrent.x -= BLOCK_SIZE;
-
-		float y = noiseY.fractal(2, wormCurrent.x / SMOOTHNESS, wormCurrent.y / SMOOTHNESS);
-		if (y >= 0)
-			wormCurrent.y += BLOCK_SIZE;
-		else
-			wormCurrent.y -= BLOCK_SIZE;
-
-		wormPositions[i] = wormCurrent;
-	}*/
-
-	int wormPoint1 = 0;
-	int wormPoint2 = 10;
-	for (size_t i = 1; i < m_caveWormLength; i++)
-	{
-		float noiseValue = m_noise->fractal(2, wormPoint1, wormPoint2);
-		if (noiseValue >= 0.25f)
+		else if (noiseValue > -0.25f && noiseValue <= 0.20f)
 		{
-			// Right
+			nextPosition = glm::vec2(16, 0);
 		}
-		else if (noiseValue >= 0)
+		else if (noiseValue > 0.20f && noiseValue <= 0.75f)
 		{
-			// Left
-		}
-		else if (noiseValue >= -0.25f)
-		{
-			// Up
+			nextPosition = glm::vec2(-16, 0);
 		}
 		else
 		{
-			// Down
+			nextPosition = glm::vec2(0, 16);
 		}
+
+		wormCurrentPosition += nextPosition;
 	}
 
-	return wormPositions;
+	return modifiedChunks;
 }
 
-void Terrain::updateWorldPositions(const Chunk* chunk)
+std::vector<Chunk*> Terrain::genTrees(Chunk* baseChunk)
 {
+	std::vector<Chunk*> modifiedChunks;
+
+	glm::vec2 baseChunkWorldPosition = chunkToWorldCoords(baseChunk->chunkPosition);
+
+	for (int i = 0; i < CHUNK_SIZE; i++)
+	{
+		float treeNoiseValue = m_treeNoise->fractal(TREE_OCTAVES, (baseChunkWorldPosition.x + i * BLOCK_SIZE + 1) / TREE_SMOOTHNESS);
+		if (treeNoiseValue > 0.15f)
+		{
+			// Calculate the surface height again since we don't have it anymore
+			int surfaceHeight = calculateSurfaceHeight(baseChunkWorldPosition.x, i);
+
+			// Check to see if the surface height is within the bounds of the chunk.
+			// Since there may be some surface chunks above or below the actual surface, this check is necessary
+			// so trees don't grow in the ground or in the air
+			if (surfaceHeight < baseChunkWorldPosition.y || surfaceHeight >= baseChunkWorldPosition.y + CHUNK_SIZE * BLOCK_SIZE)
+				continue;
+
+			int baseBlockX = i;
+			int baseBlockY = (surfaceHeight / BLOCK_SIZE) % CHUNK_SIZE;
+			while (baseBlockY < 0) // Adjust negative block y positions so that they are positive
+				baseBlockY += CHUNK_SIZE;
+
+			// Get the height of the tree
+			float treeHeightNoise = SimplexNoise::noise((baseChunkWorldPosition.x + i * BLOCK_SIZE + 1) / TREE_SMOOTHNESS);
+			int treeHeight = (int)roundf(map(treeHeightNoise, -1, 1, TREE_BASE_HEIGHT_MIN, TREE_BASE_HEIGHT_MAX));
+
+			// Keep a set of block pointers that make up the tree for leaf generation later
+			std::unordered_set<const Block*> treeBlocks;
+
+			Chunk* currentChunk = baseChunk;
+			int currentTreeHeight = baseBlockY;
+			float treeBranchHeightNoise = 0;
+			for (int j = 1; j <= treeHeight; j++)
+			{
+				currentTreeHeight = baseBlockY + j;
+				if (currentTreeHeight >= CHUNK_SIZE)
+				{
+					currentTreeHeight -= CHUNK_SIZE;
+					baseBlockY = -j - 1; // Adjust the base block y value so that on the next iteration
+										// the current tree height will be 0, since it will be in a new chunk
+
+					// The tree has outstretched the chunk, either get or generate the next one
+					glm::vec2 newChunkPosition = currentChunk->chunkPosition;
+					newChunkPosition.y++;
+
+					auto chunkIt = m_chunks.find(newChunkPosition);
+					if (chunkIt == m_chunks.end())
+					{
+						// Chunk needs to be generated
+						currentChunk = createChunk(newChunkPosition);
+						queueGenChunk(currentChunk);
+
+						std::unique_lock<std::mutex> lock(currentChunk->mutex);
+						currentChunk->cv.wait(lock); // Waits for the chunk to be fully generated
+					}
+					else
+					{
+						// Chunk already exists
+						currentChunk = chunkIt->second;
+
+						std::unique_lock<std::mutex> lock(currentChunk->mutex);
+						if (!currentChunk->hasGenerated) // Chunk exists, but hasn't fully generated yet
+						{
+							currentChunk->cv.wait(lock); // Waits for the chunk to be fully generated
+						}
+					}
+
+					// Only add the chunk to the modified chunks list if it hasn't been added already, since there can be
+					// multiple trees in the same chunk
+					if (std::find(modifiedChunks.begin(), modifiedChunks.end(), currentChunk) == modifiedChunks.end())
+						modifiedChunks.push_back(currentChunk);
+				}
+
+				treeBranchHeightNoise = SimplexNoise::noise((baseChunkWorldPosition.x + i * BLOCK_SIZE + 1) / TREE_SMOOTHNESS,
+					(baseChunkWorldPosition.y + currentTreeHeight * BLOCK_SIZE + 1) / TREE_SMOOTHNESS);
+				int treeBranchHeight = (int)roundf(map(treeBranchHeightNoise, -1, 1, TREE_BRANCH_HEIGHT_MIN, TREE_BRANCH_HEIGHT_MAX));
+				if (j > treeBranchHeight)
+				{
+					// Try to generate branches on the left and right
+					genTreeBranches(currentChunk, baseBlockX, currentTreeHeight, (float)currentTreeHeight / treeHeight, -1, treeBlocks);
+					genTreeBranches(currentChunk, baseBlockX, currentTreeHeight, (float)currentTreeHeight / treeHeight, 1, treeBlocks);
+				}
+
+				// Take ownership of the chunk while building the tree
+				std::unique_lock<std::mutex> lock(currentChunk->mutex);
+
+				Block& block = currentChunk->blocks[baseBlockX + CHUNK_SIZE * currentTreeHeight];
+				if (block.blockType != AIR) break;
+
+				currentChunk->blockCount[block.blockType]--;
+				setBlock(block, WOOD, block.sprite.transform.position, 0);
+				currentChunk->blockCount[WOOD]++;
+
+				treeBlocks.insert(&block);
+			}
+
+			// Use the noise from the block at the top of the tree to determine the leaf radius
+			int leafRadius = (int)roundf(map(treeBranchHeightNoise - (1 - currentTreeHeight / CHUNK_SIZE), -1, 1, TREE_TOP_LEAF_RADIUS_MIN, TREE_TOP_LEAF_RADIUS_MAX));
+			glm::vec2 topTreeIndices = glm::vec2(baseBlockX, currentTreeHeight);
+			for (ptrdiff_t k = -leafRadius; k <= leafRadius; k++)
+			{
+				for (ptrdiff_t j = -leafRadius; j <= leafRadius; j++)
+				{
+					// Don't put a leaf block at the bottom middle, because a flat leaf bottom looks better
+					if (k == -leafRadius && j == 0) continue;
+
+					// Checks if the current leaf indices are within the chunk
+					glm::vec2 currentLeafIndices = glm::vec2(baseBlockX + j, currentTreeHeight + k);
+					if (currentLeafIndices.x < 0 || currentLeafIndices.x >= CHUNK_SIZE ||
+						currentLeafIndices.y < 0 || currentLeafIndices.y >= CHUNK_SIZE) continue;
+
+					// Distance check
+					if ((currentLeafIndices.x - topTreeIndices.x) * (currentLeafIndices.x - topTreeIndices.x) +
+						(currentLeafIndices.y - topTreeIndices.y) * (currentLeafIndices.y - topTreeIndices.y) <= leafRadius * leafRadius)
+					{
+						// Take ownership of the chunk while building the leaf
+						std::unique_lock<std::mutex> lock(currentChunk->mutex);
+
+						Block& leafBlock = currentChunk->blocks[(size_t)currentLeafIndices.x + CHUNK_SIZE * (size_t)currentLeafIndices.y];
+						if ((leafBlock.blockType == WOOD || leafBlock.blockType == BRANCH) && treeBlocks.count(&leafBlock) == 0) continue;
+						if (leafBlock.blockType != AIR && leafBlock.blockType != WOOD && leafBlock.blockType != BRANCH) continue;
+						
+						currentChunk->blockCount[leafBlock.blockType]--;
+						setBlock(leafBlock, LEAF, leafBlock.sprite.transform.position, 0);
+						currentChunk->blockCount[LEAF]++;
+					}
+				}
+			}
+		}
+	}
+
+	return modifiedChunks;
+}
+
+void Terrain::genTreeBranches(Chunk* chunk, int blockX, int treeHeight, float heightRatio, int direction, std::unordered_set<const Block*>& treeBlocks)
+{
+	glm::vec2 baseChunkWorldPosition = chunkToWorldCoords(chunk->chunkPosition);
+	
+	// Generate noise to see if we should have a branch at this position
+	float branchNoise = SimplexNoise::noise(baseChunkWorldPosition.x + blockX * BLOCK_SIZE, baseChunkWorldPosition.y + treeHeight * BLOCK_SIZE);
+
+	if (direction < 0)
+	{
+		if (branchNoise < 0.5f) return;
+	}
+	else
+	{
+		if (branchNoise > -0.5f) return;
+	}
+	
+
+	// Calculate how long the branch is in blocks
+	float branchLengthNoise = SimplexNoise::noise((baseChunkWorldPosition.x + (blockX * BLOCK_SIZE) + (direction * BLOCK_SIZE)) / TREE_SMOOTHNESS,
+		(baseChunkWorldPosition.y + treeHeight * BLOCK_SIZE) / TREE_SMOOTHNESS);
+	int branchLength = (int)roundf(map(branchLengthNoise, -1, 1, TREE_BRANCH_LENGTH_MIN, TREE_BRANCH_LENGTH_MAX));
+	
+	int currentBranchHeight = treeHeight;
+	glm::vec2 blockIndices;
+	for (size_t i = 1; i <= branchLength; i++)
+	{
+		// Calculate the block indices for the block of the branch
+
+		// Check if the branch should curve up
+		float branchVarianceNoise = SimplexNoise::noise((baseChunkWorldPosition.x + (blockX * BLOCK_SIZE) + (direction * i * BLOCK_SIZE)),
+			(baseChunkWorldPosition.y + currentBranchHeight * BLOCK_SIZE));
+
+		if (branchVarianceNoise > (1 - heightRatio) + (1 - ((float)i / branchLength)))
+			currentBranchHeight++;
+		
+		blockIndices = glm::vec2(blockX + direction * (int)i, currentBranchHeight);
+
+		// Check if that block is outside the chunk
+		if (blockIndices.x < 0 || blockIndices.x >= CHUNK_SIZE || 
+			blockIndices.y < 0 || blockIndices.y >= CHUNK_SIZE)
+		{
+			continue;
+		}
+
+		glm::vec2 topLeafIndices = glm::vec2(blockIndices.x, blockIndices.y + 1);
+		glm::vec2 bottomLeafIndices = glm::vec2(blockIndices.x, blockIndices.y - 1);
+
+		// Take ownership of the chunk while building the branch
+		std::unique_lock<std::mutex> lock(chunk->mutex);
+
+		Block& block = chunk->blocks[(size_t)blockIndices.x + CHUNK_SIZE * (size_t)blockIndices.y];
+		if (block.blockType != AIR) return;
+
+		chunk->blockCount[block.blockType]--;
+		setBlock(block, BRANCH, block.sprite.transform.position, 0);
+		chunk->blockCount[BRANCH]++;
+
+		treeBlocks.insert(&block);
+
+		/*if (topLeafIndices.y < CHUNK_SIZE)
+		{
+			Block& topLeafBlock = chunk->blocks[(size_t)topLeafIndices.x + CHUNK_SIZE * (size_t)topLeafIndices.y];
+			if (topLeafBlock.blockType != AIR) return;
+
+			chunk->blockCount[topLeafBlock.blockType]--;
+			setBlock(topLeafBlock, LEAF, topLeafBlock.sprite.transform.position, 0);
+			chunk->blockCount[LEAF]++;
+		}
+
+		if (bottomLeafIndices.y >= 0)
+		{
+			Block& bottomLeafBlock = chunk->blocks[(size_t)bottomLeafIndices.x + CHUNK_SIZE * (size_t)bottomLeafIndices.y];
+			if (bottomLeafBlock.blockType != AIR) return;
+
+			chunk->blockCount[bottomLeafBlock.blockType]--;
+			setBlock(bottomLeafBlock, LEAF, bottomLeafBlock.sprite.transform.position, 0);
+			chunk->blockCount[LEAF]++;
+		}*/
+	}
+
+	/*if (branchLength > 0)
+	{
+		glm::vec2 endLeafIndices = glm::vec2(blockIndices.x + direction, blockIndices.y);
+		if (endLeafIndices.x >= 0 && endLeafIndices.x < CHUNK_SIZE &&
+			endLeafIndices.y >= 0 && endLeafIndices.y < CHUNK_SIZE)
+		{
+			Block& endLeafBlock = chunk->blocks[(size_t)endLeafIndices.x + CHUNK_SIZE * (size_t)endLeafIndices.y];
+			if (endLeafBlock.blockType != AIR) return;
+
+			chunk->blockCount[endLeafBlock.blockType]--;
+			setBlock(endLeafBlock, LEAF, endLeafBlock.sprite.transform.position, 0);
+			chunk->blockCount[LEAF]++;
+		}
+	}*/
+}
+
+void Terrain::sortBlockIndexMap(const Block blocks[CHUNK_SIZE * CHUNK_SIZE], unsigned int blockIndexMap[CHUNK_SIZE * CHUNK_SIZE])
+{
+	std::sort(blockIndexMap, blockIndexMap + CHUNK_SIZE * CHUNK_SIZE, [&blocks](const unsigned int& index1, const unsigned int &index2)
+	{
+		return blocks[index1].blockType < blocks[index2].blockType;
+	});
+}
+
+void Terrain::updateDrawingBuffers(const size_t containerIndex)
+{
+	const ChunkContainer& chunkContainer = m_chunkContainers[containerIndex];
+
+	// Cache the blocks pointer and the blockIndexMap pointer
+	Block* blocks = chunkContainer.chunk->blocks;
+	unsigned int* blockIndexMap = chunkContainer.chunk->blockIndexMap;
+
+	// Collect the container's world positions (in sorted order)
 	glm::vec2 worldPositions[CHUNK_SIZE * CHUNK_SIZE];
 	for (size_t i = 0; i < CHUNK_SIZE * CHUNK_SIZE; i++)
 	{
-		worldPositions[i] = chunk->blocks[i].sprite.transform.position;
+		worldPositions[i] = blocks[blockIndexMap[i]].sprite.transform.position;
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, chunk->worldPositionsVBO);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(glm::vec2) * CHUNK_SIZE * CHUNK_SIZE, &worldPositions[0][0]);
-}
-
-void Terrain::updateUVOffsetIndices(const Chunk* chunk)
-{
+	// Collect the container's uv offset indices (in sorted order)
 	unsigned int uvOffsetIndices[CHUNK_SIZE * CHUNK_SIZE];
 	for (size_t i = 0; i < CHUNK_SIZE * CHUNK_SIZE; i++)
 	{
-		uvOffsetIndices[i] = chunk->blocks[i].sprite.renderData.uvOffsetIndex;
+		uvOffsetIndices[i] = blocks[blockIndexMap[i]].sprite.renderData.uvOffsetIndex;
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, chunk->uvOffsetIndicesVBO);
+	// Update the container's world positions
+	glBindBuffer(GL_ARRAY_BUFFER, chunkContainer.worldPositionsVBO);
+	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(glm::vec2) * CHUNK_SIZE * CHUNK_SIZE, &worldPositions[0][0]);
+
+	// Update the container's uv offset indices
+	glBindBuffer(GL_ARRAY_BUFFER, chunkContainer.uvOffsetIndicesVBO);
 	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(unsigned int) * CHUNK_SIZE * CHUNK_SIZE, &uvOffsetIndices[0]);
 }
 
-void Terrain::checkGenChunks()
+void Terrain::clearWorldPositions(const ChunkContainer& chunkContainer)
+{
+	glm::vec2 worldPositions[CHUNK_SIZE * CHUNK_SIZE];
+	memset(worldPositions, 0, CHUNK_SIZE * CHUNK_SIZE);
+
+	glBindBuffer(GL_ARRAY_BUFFER, chunkContainer.worldPositionsVBO);
+	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(glm::vec2) * CHUNK_SIZE * CHUNK_SIZE, &worldPositions[0][0]);
+}
+
+void Terrain::clearUVOffsetIndices(const ChunkContainer& chunkContainer)
+{
+	unsigned int uvOffsetIndices[CHUNK_SIZE * CHUNK_SIZE];
+	memset(uvOffsetIndices, 0, CHUNK_SIZE * CHUNK_SIZE);
+
+	glBindBuffer(GL_ARRAY_BUFFER, chunkContainer.uvOffsetIndicesVBO);
+	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(unsigned int) * CHUNK_SIZE * CHUNK_SIZE, &uvOffsetIndices[0]);
+}
+
+void Terrain::checkThreadsFinished()
+{
+	// Remove any finished chunk gen threads
+	for (size_t i = 0; i < m_genChunkThreads.size(); i++)
+	{
+		if (m_genChunkThreads[i].wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		{
+			Chunk* chunk = m_genChunkThreads[i].get();
+
+			// Launch a post gen thread so that the chunk can add any additional post gen features
+			m_postGenThreads.push_back(std::async(std::launch::async, &Terrain::postGenChunkThreaded, this, chunk));
+
+			// The thread is done, remove it from the list
+			m_genChunkThreads.erase(m_genChunkThreads.begin() + i);
+			i--;
+		}
+	}
+
+	// Remove any finished post generation threads
+	for (size_t i = 0; i < m_postGenThreads.size(); i++)
+	{
+		if (m_postGenThreads[i].wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		{
+			// The chunks have fully loaded
+			std::vector<Chunk*> modifiedChunks = m_postGenThreads[i].get();
+			for (size_t i = 0; i < modifiedChunks.size(); i++)
+			{
+				modifiedChunks[i]->hasFullyLoaded = true;
+
+				// Resort the block index map since the chunks was modified
+				sortBlockIndexMap(modifiedChunks[i]->blocks, modifiedChunks[i]->blockIndexMap);
+				
+				// Update the drawing buffers with the newly sorted block indices
+				if (modifiedChunks[i]->containerIndex > -1)
+					updateDrawingBuffers(modifiedChunks[i]->containerIndex);
+			}
+
+			// The thread is done, remove it from the list
+			m_postGenThreads.erase(m_postGenThreads.begin() + i);
+			i--;
+		}
+	}
+}
+
+void Terrain::checkShiftChunkContainers()
 {
 	glm::vec2 cameraPosition = m_camera.getPosition();
 	int cameraWidth = m_camera.getWidth();
 	int cameraHeight = m_camera.getHeight();
 
-	// Check if we need to load new chunks on the right
-	if (cameraPosition.x + cameraWidth * 0.5f + CAMERA_VIEW_BUFFER >= m_chunkOriginWorldPos.x + CHUNK_SIZE * BLOCK_SIZE * (CHUNK_VIEW_DISTANCE + 1))
+	// List of chunks that need to be generated
+	std::vector<Chunk*> chunks;
+
+	// Check if we need to update the chunk containers from the right
+	if (cameraPosition.x + cameraWidth * 0.5f + CAMERA_VIEW_BUFFER_CONTAINER_REASSIGN >= m_chunkContainerOriginWorldPos.x + CHUNK_SIZE * BLOCK_SIZE * (CHUNK_CONTAINER_DISTANCE + 1))
 	{
-		// List of chunk info needed to generate the chunks
-		std::vector<std::pair<glm::vec2, Chunk*>> chunkInfo;
+		// Converts the chunk containers' origin to chunk coordinates
+		glm::vec2 chunkContainerOriginPos = worldToChunkCoords(m_chunkContainerOriginWorldPos);
 
-		// Need to generate chunks on the right and remap the chunk pointers
-		std::unordered_map<unsigned int, Chunk*> newVisibleChunkMap;
-		for (unsigned int j = 0; j < CHUNK_VIEW_DISTANCE + 1; j++)
+		// Unassign the leftmost chunks from the chunk containers
+		for (size_t i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
 		{
-			// Start at i = 1 since the leftmost chunks will be overwritten, and should be skipped
-			for (unsigned int i = 1; i < CHUNK_VIEW_DISTANCE + 1; i++)
-			{
-				// Calculate the chunk's index
-				unsigned int index = i + j * (CHUNK_VIEW_DISTANCE + 1);
+			ChunkContainer& chunkContainer = m_chunkContainers[i * (CHUNK_CONTAINER_DISTANCE + 1)];
+			chunkContainer.chunk->containerIndex = -1;
+			chunkContainer.chunk = nullptr;
 
-				// Shift over existing chunks
-				newVisibleChunkMap[index - 1] = m_visibleChunkMap[index];
-			}
-
-			// Now that all other chunks have been shifted, collect info for chunk generation and map it to the rightmost side
-
-			// Calculate index of rightmost chunk for this row
-			unsigned int index = CHUNK_VIEW_DISTANCE + j * (CHUNK_VIEW_DISTANCE + 1);
-
-			// Calculate chunk's world position for generation
-			glm::vec2 chunkWorldPosition = glm::vec2(
-				m_chunkOriginWorldPos.x + CHUNK_SIZE * BLOCK_SIZE * (CHUNK_VIEW_DISTANCE + 1),
-				m_chunkOriginWorldPos.y + CHUNK_SIZE * BLOCK_SIZE * j);
-
-			// Get the pointer to the chunk that should be overwritten (the chunk mapped to the leftmost side)
-			Chunk* oldChunk = m_visibleChunkMap[index - CHUNK_VIEW_DISTANCE];
-
-			// Store the chunk info for generating the chunks later and store the chunk's pointer in the new map
-			chunkInfo.push_back({ chunkWorldPosition, oldChunk });
-			newVisibleChunkMap[index] = oldChunk;
+			clearWorldPositions(chunkContainer);
+			clearUVOffsetIndices(chunkContainer);
 		}
 
-		// Save the new chunk map
-		m_visibleChunkMap = newVisibleChunkMap;
+		// Reassign the existing chunk containers
+		size_t chunkContainerIndex = 0;
+		for (size_t j = 0; j < CHUNK_CONTAINER_DISTANCE + 1; j++)
+		{
+			chunkContainerIndex++;
 
-		// Shift the chunk origin by 1 chunk
-		m_chunkOriginWorldPos.x += CHUNK_SIZE * BLOCK_SIZE;
+			for (size_t i = 0; i < CHUNK_CONTAINER_DISTANCE; i++)
+			{
+				ChunkContainer& chunkContainer = m_chunkContainers[chunkContainerIndex];
+				chunkContainer.chunk->containerIndex -= 1;
+				m_chunkContainers[chunkContainerIndex - 1].chunk = chunkContainer.chunk;
 
-		// Queue the chunk info
-		queueGenChunks(chunkInfo);
+				updateDrawingBuffers(chunkContainerIndex - 1);
+				chunkContainerIndex++;
+			}
+		}
+
+		// Assign the rightmost containers, or generate them if necessary
+		for (int i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
+		{
+			Chunk* chunk = nullptr;
+			glm::vec2 chunkPosition = glm::vec2(chunkContainerOriginPos.x + (CHUNK_CONTAINER_DISTANCE + 1), chunkContainerOriginPos.y + i);
+			if (m_chunks.find(chunkPosition) == m_chunks.end())
+			{
+				chunk = createChunk(chunkPosition);
+				chunks.push_back(chunk);
+			}
+			else
+				chunk = m_chunks[chunkPosition];
+				
+
+			chunk->containerIndex = CHUNK_CONTAINER_DISTANCE + (CHUNK_CONTAINER_DISTANCE + 1) * i;
+
+			ChunkContainer& chunkContainer = m_chunkContainers[chunk->containerIndex];
+			chunkContainer.chunk = chunk;
+
+			if (chunk->hasFullyLoaded)
+				updateDrawingBuffers(chunk->containerIndex);
+		}
+
+		// Shift the chunk container origin by 1 chunk
+		m_chunkContainerOriginWorldPos.x += CHUNK_SIZE * BLOCK_SIZE;
 	}
 
-	// Check if we need to load new chunks on the left
-	if (cameraPosition.x - cameraWidth * 0.5f - CAMERA_VIEW_BUFFER <= m_chunkOriginWorldPos.x)
+	// Check if we need to update the chunk containers from the left
+	if (cameraPosition.x - cameraWidth * 0.5f - CAMERA_VIEW_BUFFER_CONTAINER_REASSIGN <= m_chunkContainerOriginWorldPos.x)
 	{
-		// List of chunk info needed to generate the chunks
-		std::vector<std::pair<glm::vec2, Chunk*>> chunkInfo;
+		// Converts the chunk containers' origin to chunk coordinates
+		glm::vec2 chunkContainerOriginPos = worldToChunkCoords(m_chunkContainerOriginWorldPos);
 
-		// Need to generate chunks on the right and remap the chunk pointers
-		std::unordered_map<unsigned int, Chunk*> newVisibleChunkMap;
-		for (unsigned int j = 0; j < CHUNK_VIEW_DISTANCE + 1; j++)
+		// Unassign the rightmost chunks from the chunk containers
+		for (size_t i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
 		{
-			// End at i = CHUNK_VIEW_DISTANCE - 1 since the rightmost chunks will be overwritten, and should be skipped
-			for (unsigned int i = 0; i < CHUNK_VIEW_DISTANCE; i++)
-			{
-				// Calculate the chunk's index
-				unsigned int index = i + j * (CHUNK_VIEW_DISTANCE + 1);
+			ChunkContainer& chunkContainer = m_chunkContainers[CHUNK_CONTAINER_DISTANCE + (CHUNK_CONTAINER_DISTANCE + 1) * i];
+			chunkContainer.chunk->containerIndex = -1;
+			chunkContainer.chunk = nullptr;
 
-				// Shift over existing chunks
-				newVisibleChunkMap[index + 1] = m_visibleChunkMap[index];
-			}
-
-			// Now that all other chunks have been shifted, collect info for chunk generation and map it to the leftmost side
-
-			// Calculate index of leftmost chunk for this row
-			unsigned int index = j * (CHUNK_VIEW_DISTANCE + 1);
-
-			// Calculate chunk's world position for generation
-			glm::vec2 chunkWorldPosition = glm::vec2(
-				m_chunkOriginWorldPos.x - CHUNK_SIZE * BLOCK_SIZE,
-				m_chunkOriginWorldPos.y + CHUNK_SIZE * BLOCK_SIZE * j);
-
-			// Get the pointer to the chunk that should be overwritten (the chunk mapped to the rightmost side)
-			Chunk* oldChunk = m_visibleChunkMap[index + CHUNK_VIEW_DISTANCE];
-
-			// Store the chunk info for generating the chunks later and store the chunk's pointer in the new map
-			chunkInfo.push_back({ chunkWorldPosition, oldChunk });
-			newVisibleChunkMap[index] = oldChunk;
+			clearWorldPositions(chunkContainer);
+			clearUVOffsetIndices(chunkContainer);
 		}
 
-		// Save the new chunk map
-		m_visibleChunkMap = newVisibleChunkMap;
+		// Reassign the existing chunk containers
+		size_t chunkContainerIndex = CHUNK_CONTAINER_SIZE - 1;
+		for (size_t j = 0; j < CHUNK_CONTAINER_DISTANCE + 1; j++)
+		{
+			chunkContainerIndex--;
 
-		// Shift the chunk origin by 1 chunk
-		m_chunkOriginWorldPos.x -= CHUNK_SIZE * BLOCK_SIZE;
+			for (size_t i = 0; i < CHUNK_CONTAINER_DISTANCE; i++)
+			{
+				ChunkContainer& chunkContainer = m_chunkContainers[chunkContainerIndex];
+				chunkContainer.chunk->containerIndex += 1;
+				m_chunkContainers[chunkContainerIndex + 1].chunk = chunkContainer.chunk;
 
-		// Queue the chunk info
-		queueGenChunks(chunkInfo);
+				updateDrawingBuffers(chunkContainerIndex + 1);
+				chunkContainerIndex--;
+			}
+		}
+
+		// Assign the leftmost containers, or generate them if necessary
+		for (int i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
+		{
+			Chunk* chunk = nullptr;
+			glm::vec2 chunkPosition = glm::vec2(chunkContainerOriginPos.x - 1, chunkContainerOriginPos.y + i);
+			if (m_chunks.find(chunkPosition) == m_chunks.end())
+			{
+				chunk = createChunk(chunkPosition);
+				chunks.push_back(chunk);
+			}
+			else
+				chunk = m_chunks[chunkPosition];
+
+			chunk->containerIndex = i * (CHUNK_CONTAINER_DISTANCE + 1);
+
+			ChunkContainer& chunkContainer = m_chunkContainers[chunk->containerIndex];
+			chunkContainer.chunk = chunk;
+
+			if (chunk->hasFullyLoaded)
+				updateDrawingBuffers(chunk->containerIndex);
+		}
+
+		// Shift the chunk container origin by 1 chunk
+		m_chunkContainerOriginWorldPos.x -= CHUNK_SIZE * BLOCK_SIZE;
 	}
 
-	// Check if we need to load new chunks on the top
-	if (cameraPosition.y + cameraHeight * 0.5f + CAMERA_VIEW_BUFFER >= m_chunkOriginWorldPos.y + CHUNK_SIZE * BLOCK_SIZE * (CHUNK_VIEW_DISTANCE + 1) && cameraPosition.y + cameraHeight * 0.5f <= TERRAIN_CHUNK_HEIGHT * CHUNK_SIZE * BLOCK_SIZE)
+	// Check if we need to update the chunk containers from the top
+	if (cameraPosition.y + cameraHeight * 0.5f + CAMERA_VIEW_BUFFER_CONTAINER_REASSIGN >= m_chunkContainerOriginWorldPos.y + CHUNK_SIZE * BLOCK_SIZE * (CHUNK_CONTAINER_DISTANCE + 1) && cameraPosition.y + cameraHeight * 0.5f <= TERRAIN_CHUNK_HEIGHT * CHUNK_SIZE * BLOCK_SIZE)
 	{
-		// List of chunk info needed to generate the chunks
-		std::vector<std::pair<glm::vec2, Chunk*>> chunkInfo;
+		// Converts the chunk containers' origin to chunk coordinates
+		glm::vec2 chunkContainerOriginPos = worldToChunkCoords(m_chunkContainerOriginWorldPos);
 
-		// Need to generate chunks on the top and remap the chunk pointers
-		// Start at j = 1 since the bottommost chunks will be overwritten, and should be skipped
-		std::unordered_map<unsigned int, Chunk*> newVisibleChunkMap;
-		for (int j = 1; j < CHUNK_VIEW_DISTANCE + 1; j++)
+		// Unassign the bottommost chunks from the chunk containers
+		for (size_t i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
 		{
-			for (int i = 0; i < CHUNK_VIEW_DISTANCE + 1; i++)
-			{
-				// Calculate the chunk's index
-				unsigned int index = i + j * (CHUNK_VIEW_DISTANCE + 1);
+			ChunkContainer& chunkContainer = m_chunkContainers[i];
+			chunkContainer.chunk->containerIndex = -1;
+			chunkContainer.chunk = nullptr;
 
-				// Shift over existing chunks
-				newVisibleChunkMap[index - (CHUNK_VIEW_DISTANCE + 1)] = m_visibleChunkMap[index];
-			}
-
-			// Now that all other chunks have been shifted, collect info for chunk generation and map it to the topmost side
-
-			// Calculate index of topmost chunk for this column
-			unsigned int index = j + (CHUNK_VIEW_DISTANCE + 1) * CHUNK_VIEW_DISTANCE;
-
-			// Calculate chunk's world position for generation
-			glm::vec2 chunkWorldPosition = glm::vec2(
-				m_chunkOriginWorldPos.x + CHUNK_SIZE * BLOCK_SIZE * j,
-				m_chunkOriginWorldPos.y + CHUNK_SIZE * BLOCK_SIZE * (CHUNK_VIEW_DISTANCE + 1));
-
-			// Get the pointer to the chunk that should be overwritten (the chunk mapped to the bottommost side)
-			Chunk* oldChunk = m_visibleChunkMap[j];
-
-			// Store the chunk info for generating the chunks later and store the chunk's pointer in the new map
-			chunkInfo.push_back({ chunkWorldPosition, oldChunk });
-			newVisibleChunkMap[index] = oldChunk;
+			clearWorldPositions(chunkContainer);
+			clearUVOffsetIndices(chunkContainer);
 		}
 
-		// Now only chunk at the top left needs to be generated
+		// Reassign the existing chunk containers
+		size_t chunkContainerIndex = CHUNK_CONTAINER_DISTANCE + 1;
+		for (size_t j = 0; j < CHUNK_CONTAINER_DISTANCE; j++)
+		{
+			for (size_t i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
+			{
+				ChunkContainer& chunkContainer = m_chunkContainers[chunkContainerIndex];
+				chunkContainer.chunk->containerIndex -= (CHUNK_CONTAINER_DISTANCE + 1);
+				m_chunkContainers[chunkContainerIndex - (CHUNK_CONTAINER_DISTANCE + 1)].chunk = chunkContainer.chunk;
 
-		// Calculate chunk's world position for generation
-		glm::vec2 chunkWorldPosition = glm::vec2(
-			m_chunkOriginWorldPos.x,
-			m_chunkOriginWorldPos.y + CHUNK_SIZE * BLOCK_SIZE * (CHUNK_VIEW_DISTANCE + 1));
+				updateDrawingBuffers(chunkContainerIndex - (CHUNK_CONTAINER_DISTANCE + 1));
+				chunkContainerIndex++;
+			}
+		}
 
-		// Get the pointer to the chunk that should be overwritten (the chunk mapped to the bottommost side)
-		Chunk* oldChunk = m_visibleChunkMap[0];
+		// Assign the topmost containers, or generate them if necessary
+		for (int i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
+		{
+			Chunk* chunk = nullptr;
+			glm::vec2 chunkPosition = glm::vec2(chunkContainerOriginPos.x + i, chunkContainerOriginPos.y + (CHUNK_CONTAINER_DISTANCE + 1));
+			if (m_chunks.find(chunkPosition) == m_chunks.end())
+			{
+				chunk = createChunk(chunkPosition);
+				chunks.push_back(chunk);
+			}
+			else
+				chunk = m_chunks[chunkPosition];
 
-		// Store the chunk info for generating the chunks later and store the chunk's pointer in the new map
-		chunkInfo.push_back({ chunkWorldPosition, oldChunk });
-		newVisibleChunkMap[(CHUNK_VIEW_DISTANCE + 1) * CHUNK_VIEW_DISTANCE] = oldChunk;
+			chunk->containerIndex = (CHUNK_CONTAINER_SIZE - 1) - CHUNK_CONTAINER_DISTANCE + i;
 
-		// Save the new chunk map
-		m_visibleChunkMap = newVisibleChunkMap;
+			ChunkContainer& chunkContainer = m_chunkContainers[chunk->containerIndex];
+			chunkContainer.chunk = chunk;
 
-		// Shift the chunk origin by 1 chunk
-		m_chunkOriginWorldPos.y += CHUNK_SIZE * BLOCK_SIZE;
+			if (chunk->hasFullyLoaded)
+				updateDrawingBuffers(chunk->containerIndex);
+		}
 
-		// Queue the chunk info
-		queueGenChunks(chunkInfo);
+		// Shift the chunk container origin by 1 chunk
+		m_chunkContainerOriginWorldPos.y += CHUNK_SIZE * BLOCK_SIZE;
 	}
 
-	// Check if we need to load new chunks on the bottom
-	if (cameraPosition.y - cameraHeight * 0.5f - CAMERA_VIEW_BUFFER <= m_chunkOriginWorldPos.y && cameraPosition.y - cameraHeight * 0.5f >= -TERRAIN_CHUNK_HEIGHT * CHUNK_SIZE * BLOCK_SIZE)
+	// Check if we need to update the chunk containers from the bottom
+	if (cameraPosition.y - cameraHeight * 0.5f - CAMERA_VIEW_BUFFER_CONTAINER_REASSIGN <= m_chunkContainerOriginWorldPos.y && cameraPosition.y - cameraHeight * 0.5f >= -TERRAIN_CHUNK_HEIGHT * CHUNK_SIZE * BLOCK_SIZE)
 	{
-		// List of chunk info needed to generate the chunks
-		std::vector<std::pair<glm::vec2, Chunk*>> chunkInfo;
+		// Converts the chunk containers' origin to chunk coordinates
+		glm::vec2 chunkContainerOriginPos = worldToChunkCoords(m_chunkContainerOriginWorldPos);
 
-		// Need to generate chunks on the bottom and remap the chunk pointers
-		// Start at j = CHUNK_VIEW_DISTANCE and go backwards since the topmost chunks will be overwritten, and should be skipped
-		std::unordered_map<unsigned int, Chunk*> newVisibleChunkMap;
-		for (int j = CHUNK_VIEW_DISTANCE; j > 0; j--)
+		// Unassign the topmost chunks from the chunk containers
+		for (size_t i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
 		{
-			for (int i = 0; i < CHUNK_VIEW_DISTANCE + 1; i++)
-			{
-				// Calculate the chunk's index
-				unsigned int index = i + j * (CHUNK_VIEW_DISTANCE + 1);
+			ChunkContainer& chunkContainer = m_chunkContainers[i + (CHUNK_CONTAINER_SIZE - 1) - CHUNK_CONTAINER_DISTANCE];
+			chunkContainer.chunk->containerIndex = -1;
+			chunkContainer.chunk = nullptr;
 
-				// Shift over existing chunks
-				newVisibleChunkMap[index] = m_visibleChunkMap[index - (CHUNK_VIEW_DISTANCE + 1)];
-			}
-
-			// Now that all other chunks have been shifted, collect info for chunk generation and map it to the bottommost side
-
-			// Calculate index of bottommost chunk for this column
-			unsigned int index = j;
-
-			// Calculate chunk's world position for generation
-			glm::vec2 chunkWorldPosition = glm::vec2(
-				m_chunkOriginWorldPos.x + CHUNK_SIZE * BLOCK_SIZE * j,
-				m_chunkOriginWorldPos.y - CHUNK_SIZE * BLOCK_SIZE);
-
-			// Get the pointer to the chunk that should be overwritten (the chunk mapped to the topmost side)
-			Chunk* oldChunk = m_visibleChunkMap[index + (CHUNK_VIEW_DISTANCE + 1) * CHUNK_VIEW_DISTANCE];
-
-			// Store the chunk info for generating the chunks later and store the chunk's pointer in the new map
-			chunkInfo.push_back({ chunkWorldPosition, oldChunk });
-			newVisibleChunkMap[index] = oldChunk;
+			clearWorldPositions(chunkContainer);
+			clearUVOffsetIndices(chunkContainer);
 		}
 
-		// Now only chunk at the bottom left needs to be generated
+		// Reassign the existing chunk containers
+		size_t chunkContainerIndex = (CHUNK_CONTAINER_SIZE - 1) - (CHUNK_CONTAINER_DISTANCE + 1);
+		for (size_t j = 0; j < CHUNK_CONTAINER_DISTANCE; j++)
+		{
+			for (size_t i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
+			{
+				ChunkContainer& chunkContainer = m_chunkContainers[chunkContainerIndex];
+				chunkContainer.chunk->containerIndex += (CHUNK_CONTAINER_DISTANCE + 1);
+				m_chunkContainers[chunkContainerIndex + (CHUNK_CONTAINER_DISTANCE + 1)].chunk = chunkContainer.chunk;
 
-		// Calculate chunk's world position for generation
-		glm::vec2 chunkWorldPosition = glm::vec2(
-			m_chunkOriginWorldPos.x,
-			m_chunkOriginWorldPos.y - CHUNK_SIZE * BLOCK_SIZE);
+				updateDrawingBuffers(chunkContainerIndex + (CHUNK_CONTAINER_DISTANCE + 1));
+				chunkContainerIndex--;
+			}
+		}
 
-		// Get the pointer to the chunk that should be overwritten (the chunk mapped to the topmost side)
-		Chunk* oldChunk = m_visibleChunkMap[(CHUNK_VIEW_DISTANCE + 1) * CHUNK_VIEW_DISTANCE];
+		// Assign the bottommost containers, or generate them if necessary
+		for (int i = 0; i < CHUNK_CONTAINER_DISTANCE + 1; i++)
+		{
+			Chunk* chunk = nullptr;
+			glm::vec2 chunkPosition = glm::vec2(chunkContainerOriginPos.x + i, chunkContainerOriginPos.y - 1);
+			if (m_chunks.find(chunkPosition) == m_chunks.end())
+			{
+				chunk = createChunk(chunkPosition);
+				chunks.push_back(chunk);
+			}
+			else
+				chunk = m_chunks[chunkPosition];
 
-		// Store the chunk info for generating the chunks later and store the chunk's pointer in the new map
-		chunkInfo.push_back({ chunkWorldPosition, oldChunk });
-		newVisibleChunkMap[0] = oldChunk;
+			chunk->containerIndex = i;
 
-		// Save the new chunk map
-		m_visibleChunkMap = newVisibleChunkMap;
+			ChunkContainer& chunkContainer = m_chunkContainers[chunk->containerIndex];
+			chunkContainer.chunk = chunk;
 
-		// Shift the chunk origin by 1 chunk
-		m_chunkOriginWorldPos.y -= CHUNK_SIZE * BLOCK_SIZE;
+			if (chunk->hasFullyLoaded)
+				updateDrawingBuffers(chunk->containerIndex);
+		}
 
-		// Queue the chunk info
-		queueGenChunks(chunkInfo);
+		// Shift the chunk container origin by 1 chunk
+		m_chunkContainerOriginWorldPos.y -= CHUNK_SIZE * BLOCK_SIZE;
+	}
+
+	// Queue the chunks for generation
+	queueGenChunks(chunks);
+}
+
+void Terrain::checkGenChunks()
+{
+	std::vector<Chunk*> chunks;
+
+	glm::vec2 cameraPosition = m_camera.getPosition();
+	int cameraWidth = m_camera.getWidth();
+	int cameraHeight = m_camera.getHeight();
+
+	glm::vec2 cameraChunkPosition = worldToChunkCoords(cameraPosition);
+
+	// Check for chunks in a square around the camera
+	for (ptrdiff_t j = (ptrdiff_t)cameraChunkPosition.y - CAMERA_VIEW_BUFFER_GEN; j <= cameraChunkPosition.y + CAMERA_VIEW_BUFFER_GEN; j++)
+	{
+		for (ptrdiff_t i = (ptrdiff_t)cameraChunkPosition.x - CAMERA_VIEW_BUFFER_GEN; i <= cameraChunkPosition.x + CAMERA_VIEW_BUFFER_GEN; i++)
+		{
+			glm::vec2 chunkPosition = glm::vec2(i, j);
+			if (m_chunks.count(chunkPosition) == 0)
+			{
+				Chunk* chunk = createChunk(chunkPosition);
+				chunks.push_back(chunk);
+			}
+		}
+	}
+
+	if (!chunks.empty())
+		queueGenChunks(chunks);
+}
+
+void Terrain::checkUnloadChunks()
+{
+	glm::vec2 cameraPosition = m_camera.getPosition();
+	int cameraWidth = m_camera.getWidth();
+	int cameraHeight = m_camera.getHeight();
+
+	std::vector<glm::vec2> chunksToUnload;
+	for (auto it = m_chunks.begin(); it != m_chunks.end(); it++)
+	{
+		// Don't unload chunks that haven't been fully loaded yet, as that can cause multithreaded crashes
+		if (!it->second->hasFullyLoaded) continue;
+
+		glm::vec2 chunkWorldPosition = chunkToWorldCoords(it->first);
+		float worldUnloadBuffer = CAMERA_VIEW_BUFFER_UNLOAD * CHUNK_SIZE * BLOCK_SIZE;
+		if (chunkWorldPosition.x + CHUNK_SIZE * BLOCK_SIZE < cameraPosition.x - cameraWidth * 0.5f - worldUnloadBuffer ||
+			chunkWorldPosition.x > cameraPosition.x + cameraWidth * 0.5f + worldUnloadBuffer ||
+			chunkWorldPosition.y + CHUNK_SIZE * BLOCK_SIZE < cameraPosition.y - cameraHeight * 0.5f - worldUnloadBuffer ||
+			chunkWorldPosition.y > cameraPosition.y + cameraHeight * 0.5f + worldUnloadBuffer)
+		{
+			delete it->second;
+			it->second = nullptr;
+			chunksToUnload.push_back(it->first);
+		}
+	}
+
+	for (size_t i = 0; i < chunksToUnload.size(); i++)
+	{
+		m_chunks.erase(chunksToUnload[i]);
 	}
 }
 
@@ -712,6 +1282,11 @@ void Terrain::setBlock(Block& block, BlockType type, glm::vec2 position, unsigne
 	block.sprite.renderData = blockRenderData;
 	block.sprite.renderData.uvOffsetIndex = uvOffsetIndex;
 	block.sprite.transform = Transform(position, glm::vec2(BLOCK_SIZE));
+}
+
+int Terrain::calculateSurfaceHeight(float chunkWorldPositionX, size_t blockX)
+{
+	return (int)(roundf(m_terrainNoise->fractal(SURFACE_OCTAVES, (chunkWorldPositionX + blockX * BLOCK_SIZE + 1) / SMOOTHNESS) * HEIGHT_FLUX / BLOCK_SIZE) * BLOCK_SIZE);
 }
 
 glm::vec2 Terrain::worldToChunkCoords(glm::vec2 worldPosition) const
@@ -730,5 +1305,5 @@ glm::vec2 Terrain::chunkToWorldCoords(glm::vec2 chunkPosition) const
 
 glm::vec2 Terrain::snapToBlockGrid(glm::vec2 worldPosition) const
 {
-	return glm::vec2((int)worldPosition.x & 0xfff0, (int)worldPosition.y & 0xfff0);
+	return glm::vec2((int)(worldPosition.x / BLOCK_SIZE) * BLOCK_SIZE, (int)(worldPosition.y / BLOCK_SIZE) * BLOCK_SIZE);
 }

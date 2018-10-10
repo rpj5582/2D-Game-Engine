@@ -17,6 +17,10 @@
  */
 class SimplexNoise {
 public:
+	// Seed the noise by seeding the random number generator used to shuffle the perm array
+	// Should only be called whenever the seed changes
+	static void init(unsigned int seed);
+
     // 1D Perlin simplex noise
     static float noise(float x);
     // 2D Perlin simplex noise
@@ -37,14 +41,14 @@ public:
      * @param[in] lacunarity   Lacunarity specifies the frequency multiplier between successive octaves (default to 2.0).
      * @param[in] persistence  Persistence is the loss of amplitude between successive octaves (usually 1/lacunarity)
      */
-	explicit SimplexNoise(int seed = 0,
+	explicit SimplexNoise(
 		float frequency = 1.0f,
 		float amplitude = 1.0f,
 		float lacunarity = 2.0f,
-		float persistence = 0.5f);
+		float persistence = 0.5f) : mFrequency(frequency), mAmplitude(amplitude), mLacunarity(lacunarity), mPersistence(persistence) {}
 
 private:
-	int mSeed;
+	static unsigned int sSeed;
 
     // Parameters of Fractional Brownian Motion (fBm) : sum of N "octaves" of noise
     float mFrequency;   ///< Frequency ("width") of the first octave of noise (default to 1.0)

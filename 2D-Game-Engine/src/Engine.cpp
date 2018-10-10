@@ -5,6 +5,9 @@
 
 Engine::Engine(int width, int height)
 {
+	// Seed the simplex noise generator
+	SimplexNoise::init(0);
+
 	m_assetManager = new AssetManager();
 	m_renderer = new Renderer();
 
@@ -12,7 +15,7 @@ Engine::Engine(int width, int height)
 	BlockContainer blocks;
 
 	m_camera = new Camera(width, height);
-	m_terrain = new Terrain(0, *m_camera, m_renderer->getVertexBufferID(), m_renderer->getIndexBufferID());
+	m_terrain = new Terrain(*m_camera, m_renderer->getVertexBufferID(), m_renderer->getIndexBufferID());
 
 	m_playerController = new PlayerController(Transform(glm::vec2(), glm::vec2(32, 64)));
 

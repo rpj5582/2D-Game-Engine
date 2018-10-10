@@ -117,7 +117,7 @@ void Renderer::render(const Camera& camera, const Terrain& terrain)
 	const glm::mat4& projection = camera.getProjectionMatrix();
 	const glm::mat4& view = camera.getViewMatrix();
 
-	const Chunk* chunks = terrain.getVisibleChunks();
+	const ChunkContainer* chunkContainers = terrain.getChunkContainers();
 
 	AssetManager* assetManager = AssetManager::getInstance();
 	unsigned int terrainShaderID = assetManager->getShader("terrainShader");
@@ -130,36 +130,39 @@ void Renderer::render(const Camera& camera, const Terrain& terrain)
 	glUniformMatrix4fv(0, 1, GL_FALSE, &projection[0][0]);
 	glUniformMatrix4fv(1, 1, GL_FALSE, &view[0][0]);
 
+	// Upload a tint color
 	glUniform4f(5, 1.0f, 1.0f, 1.0f, 1.0f);
 
 	// Bind the texture
 	glBindTexture(GL_TEXTURE_2D, blockSpritesheet);
 
-	for (size_t i = 0; i < CHUNK_VIEW_SIZE; i++)
+	for (size_t i = 0; i < CHUNK_CONTAINER_SIZE; i++)
 	{
-		// Bind the chunk's VAO
-		glBindVertexArray(chunks[i].vao);
-
-		unsigned int blockCountSum = 0;
-		for (size_t j = 1; j < BLOCK_COUNT; j++)
+		if (chunkContainers[i].chunk && chunkContainers[i].chunk->hasFullyLoaded)
 		{
-			// Add to the block sum so the instance offset is consistent
-			blockCountSum += chunks[i].blockCount[j - 1];
+			// Bind the chunk's VAO
+			glBindVertexArray(chunkContainers[i].vao);
 
-			// Don't render this block type if there aren't any present in the chunk
-			if (chunks[i].blockCount[j] == 0) continue;
+			unsigned int blockCountSum = 0;
+			for (size_t j = 1; j < BLOCK_COUNT; j++)
+			{
+				// Add to the block sum so the instance offset is consistent
+				blockCountSum += chunkContainers[i].chunk->blockCount[j - 1];
 
-			// Get the pointer to the start of the blocks we want to render
-			// Offset the blocks array by the previous block's count
-			const Block* blocks = chunks[i].blocks + blockCountSum;
+				// Don't render this block type if there aren't any present in the chunk
+				if (chunkContainers[i].chunk->blockCount[j] == 0) continue;
 
-			// Upload uniforms
-			glm::vec2 uvOffsetScaleFactor = blocks[0].sprite.renderData.texture.dimensions / (blocks[0].sprite.renderData.tileDimensions - glm::vec2(TEXTURE_SHRINK_FACTOR));
-			glUniform2fv(4, 1, &uvOffsetScaleFactor[0]);
-			glUniform2fv(6, MAX_ANIMATION_LENGTH, &blocks[0].sprite.renderData.uvOffsets[0][0]);
+				// Gets the render data for the current block
+				const RenderData& blockRenderData = BlockContainer::getBlockRenderData((BlockType)j);
 
-			// Draw the block using instanced rendering
-			glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (void*)0, chunks[i].blockCount[j], blockCountSum);
+				// Upload uniforms
+				glm::vec2 uvOffsetScaleFactor = blockRenderData.texture.dimensions / (blockRenderData.tileDimensions - glm::vec2(TEXTURE_SHRINK_FACTOR));
+				glUniform2fv(4, 1, &uvOffsetScaleFactor[0]);
+				glUniform2fv(6, MAX_ANIMATION_LENGTH, &blockRenderData.uvOffsets[0][0]);
+
+				// Draw the block using instanced rendering
+				glDrawElementsInstancedBaseInstance(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (void*)0, chunkContainers[i].chunk->blockCount[j], blockCountSum);
+			}
 		}
 	}
 }

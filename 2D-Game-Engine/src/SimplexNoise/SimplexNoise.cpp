@@ -85,6 +85,8 @@ static uint8_t perm[256] = {
     138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180
 };
 
+unsigned int SimplexNoise::sSeed = 0;
+
 /**
  * Helper function to hash an integer using the above permutation table
  *
@@ -162,6 +164,15 @@ static float grad(int32_t hash, float x, float y, float z) {
     float u = h < 8 ? x : y; // gradient directions, and compute dot product.
     float v = h < 4 ? y : h == 12 || h == 14 ? x : z; // Fix repeats at h = 12 to 15
     return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
+}
+
+void SimplexNoise::init(unsigned int seed)
+{
+	sSeed = seed;
+	srand(sSeed);
+	std::random_shuffle(perm, perm + 257, [](ptrdiff_t max) {
+		return rand() % max;
+	});
 }
 
 /**
@@ -473,17 +484,4 @@ float SimplexNoise::fractal(size_t octaves, float x, float y, float z) const {
     }
 
     return (output / denom);
-}
-
-SimplexNoise::SimplexNoise(int seed, float frequency, float amplitude, float lacunarity, float persistence) :
-	mSeed(seed),
-	mFrequency(frequency),
-	mAmplitude(amplitude),
-	mLacunarity(lacunarity),
-	mPersistence(persistence)
-{
-	std::srand(seed);
-	std::random_shuffle(perm, perm + 257, [](int max){
-		return rand() % max;
-	});
 }

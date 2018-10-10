@@ -3,7 +3,7 @@
 #include <glm.hpp>
 #include <gtc/matrix_transform.hpp>
 
-#define CAMERA_VERTICAL_CLAMP 9216
+#define CAMERA_VERTICAL_CLAMP 17408
 
 class Camera
 {
