@@ -9,92 +9,100 @@ Engine::Engine(int width, int height)
 	SimplexNoise::init(0);
 
 	m_assetManager = new AssetManager();
-	m_renderer = new Renderer();
+
+	// Construct the systems
+	m_transformSystem = new TransformSystem();
+	m_renderSystem = new RendererSystem();
+	m_physicsSystem = new PhysicsSystem();
 
 	// Call the blocks constructor to initialize all the blocks
 	BlockContainer blocks;
 
 	m_camera = new Camera(width, height);
-	m_terrain = new Terrain(*m_camera, m_renderer->getVertexBufferID(), m_renderer->getIndexBufferID());
+	m_terrain = new Terrain(m_physicsSystem->getWorld(), m_camera->getPosition(), m_renderSystem->getVertexBufferID(), m_renderSystem->getIndexBufferID());
 
-	m_playerController = new PlayerController(Transform(glm::vec2(), glm::vec2(32, 64)));
+	// Create player
+	AssetManager* assetManager = AssetManager::getInstance();
+	unsigned int playerTextureID = assetManager->loadTexture("player", "textures/player.png");
+	unsigned int defaultShaderID = assetManager->getShader("defaultShader");
 
-	m_collisionHandler = new CollisionHandler();
+	size_t playerID = 1;
+	m_playerController = new PlayerController(playerID);
+
+	TransformSystem::getInstance()->addComponent(playerID, glm::vec2(), glm::vec2(32, 64));
+	RendererSystem::getInstance()->addComponent(playerID, Texture(glm::vec2(32, 64), playerTextureID), glm::vec2(32, 64), defaultShaderID, 0, nullptr);
+	
+	size_t playerPhysicsObjectIndex = PhysicsSystem::getInstance()->addComponent(playerID, glm::vec2(), glm::vec2(32, 64), b2_dynamicBody);
+	PhysicsSystem::getInstance()->addFixture(playerID, playerPhysicsObjectIndex, glm::vec2(0, -32), glm::vec2(32, 4), true,
+		std::bind(&PlayerController::beginContact, m_playerController, std::placeholders::_1, std::placeholders::_2),
+		std::bind(&PlayerController::endContact, m_playerController, std::placeholders::_1, std::placeholders::_2));
+	PhysicsSystem::getInstance()->addFixture(playerID, playerPhysicsObjectIndex, glm::vec2(), glm::vec2(32, 64));
+
+
+	// TEMP
+	size_t tempID = 2;
+	TransformSystem::getInstance()->addComponent(tempID, glm::vec2(0, -100), glm::vec2(2048, 64));
+	RendererSystem::getInstance()->addComponent(tempID, Texture(glm::vec2(32, 64), playerTextureID), glm::vec2(32, 64), defaultShaderID, 0, nullptr);
+	
+	size_t tempPhysicsObjectIndex = PhysicsSystem::getInstance()->addComponent(tempID, glm::vec2(0, -100), glm::vec2(2048, 64), b2_kinematicBody);
+	PhysicsSystem::getInstance()->addFixture(tempID, tempPhysicsObjectIndex, glm::vec2(), glm::vec2(2048, 64));
+
+#ifdef _DEBUG
+	m_debugDraw = new DebugDrawPhysics(*m_camera);
+	m_debugDraw->SetFlags(b2Draw::e_shapeBit);
+	m_physicsSystem->setDebugDraw(m_debugDraw);
+	m_shouldDrawDebugPhysics = false;
+#endif 
 }
 
 Engine::~Engine()
 {
-	delete m_collisionHandler;
+#ifdef _DEBUG
+	delete m_debugDraw;
+#endif 
+
 	delete m_playerController;
 	delete m_terrain;
 	delete m_camera;
-	delete m_renderer;
+	delete m_physicsSystem;
+	delete m_renderSystem;
+	delete m_transformSystem;
 	delete m_assetManager;
 }
 
 void Engine::update(float deltaTime)
 {
-	Sprite temp = Sprite(
-		Transform(glm::vec2(0, 100), glm::vec2(32, 64)),
-		RenderData(Texture(glm::vec2(32, 64), AssetManager::getInstance()->getTexture("player")), AssetManager::getInstance()->getShader("defaultShader"), glm::vec2(32, 64), 0, nullptr)
-	);
-
 	m_playerController->update(deltaTime);
+
+	m_terrain->cameraUpdate(*m_camera);
 	m_terrain->update();
 
-	//m_collisionHandler->clearGrid();
+	m_physicsSystem->update();
 
-	//// Entity-entity collision
-	//std::vector<Sprite*> sprites = { m_playerController->getSprite(), &temp };
-
-	//m_collisionHandler->insertIntoGrid(&sprites[0], sprites.size());
-
-	//std::vector<CollisionPair>& collisionPairs = m_collisionHandler->getCollisionPairs();
-	//std::unordered_map<CollisionPair, bool> pairCheckedMap;
-	//for (size_t i = 0; i < collisionPairs.size(); i++)
-	//{
-	//	auto it = pairCheckedMap.find(collisionPairs[i]);
-	//	if (it != pairCheckedMap.end())
-	//	{
-	//		if (it->second) continue;
-	//	}
-
-	//	glm::vec2 mtv;
-	//	if (m_collisionHandler->calculateResolution(collisionPairs[i], &mtv))
-	//	{
-	//		collisionPairs[i].sprite1.transform.translate(mtv);
-	//		pairCheckedMap[collisionPairs[i]] = true;
-	//	}
-	//}
-
-	//// Player-terrain collision
-	//Sprite* playerSprite = m_playerController->getSprite();
-	//std::vector<Chunk*> collidingChunks = m_terrain->getCollidingChunks(*playerSprite);
-	//for (size_t i = 0; i < collidingChunks.size(); i++)
-	//{
-	//	Chunk* chunk = collidingChunks[i];
-	//	for (size_t j = 0; j < CHUNK_SIZE * CHUNK_SIZE; j++)
-	//	{
-	//		Block& block = chunk->blocks[j];
-	//		if (block.blockType == AIR)
-	//			continue;
-
-	//		glm::vec2 mtv;
-	//		CollisionPair collisionPair = { *playerSprite, chunk->blocks[j].sprite };
-	//		if (m_collisionHandler->calculateResolution(collisionPair, 1, &mtv))
-	//		{
-	//			m_playerController->translate(mtv);
-	//		}
-	//	}
-	//}
-
-	m_camera->translate(m_playerController->getPosition() - m_camera->getPosition());
+#ifdef _DEBUG
+	if (Input::getInstance()->isKeyPressed(GLFW_KEY_Q))
+	{
+		m_shouldDrawDebugPhysics = !m_shouldDrawDebugPhysics;
+	}
+#endif
 
 	glClear(GL_COLOR_BUFFER_BIT);
 
-	m_renderer->render(*m_camera, *m_terrain);
-	m_renderer->render(*m_camera, m_playerController->getSprite(), 1);
-	m_renderer->render(*m_camera, &temp, 1);
+	const Transform* playerTransform = TransformSystem::getInstance()->getComponent(m_playerController->getPlayerID());
+	if (playerTransform)
+		m_camera->translate(playerTransform->position - m_camera->getPosition());
+	
+	m_terrain->render(*m_camera);
+	m_renderSystem->render(*m_camera);
+
+#ifdef _DEBUG
+	if (m_shouldDrawDebugPhysics)
+	{
+		m_debugDraw->clearInstanceData();
+		m_physicsSystem->drawDebugData();
+		m_debugDraw->draw();
+	}
+#endif
 }
 
 void Engine::onWindowResize(int width, int height)

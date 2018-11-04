@@ -1,6 +1,9 @@
 #include "stdafx.h"
 #include "AssetManager.h"
 
+#include <GL/glew.h>
+#include <FreeImage.h>
+
 #include <fstream>
 
 AssetManager* AssetManager::m_instance = nullptr;

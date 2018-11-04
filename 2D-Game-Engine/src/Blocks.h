@@ -1,7 +1,9 @@
 #pragma once
 
 #include "AssetManager.h"
-#include "Sprite.h"
+#include "Components/Transform.h"
+#include "Systems/RenderSystem.h"
+#include "Systems/PhysicsSystem.h"
 
 #define BLOCK_SIZE 16 // The size of a block in pixels
 #define BLOCK_COUNT 7 // The number of different blocks
@@ -17,14 +19,23 @@ enum BlockType
 	LEAF
 };
 
+struct Block
+{
+	Block() : transform(Transform(0)), renderable(Renderable(0)), blockType(AIR) {}
+
+	Transform transform;
+	Renderable renderable;
+	BlockType blockType;
+};
+
 class BlockContainer
 {
 public:
 	BlockContainer();
 	~BlockContainer();
 
-	static const RenderData& getBlockRenderData(BlockType name);
+	static const Renderable& getBlockRenderData(BlockType name);
 
 private:
-	static std::unordered_map<BlockType, RenderData> blockRenderData;
+	static std::vector<const Renderable*> m_blockRenderData;
 };

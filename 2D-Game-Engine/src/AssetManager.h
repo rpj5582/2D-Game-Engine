@@ -1,8 +1,5 @@
 #pragma once
 
-#include <GL/glew.h>
-#include <FreeImage.h>
-
 class AssetManager
 {
 public:

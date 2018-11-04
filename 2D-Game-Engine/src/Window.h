@@ -1,5 +1,7 @@
 #pragma once
 
+#include <GL/glew.h>
+
 #include "Engine.h"
 #include "Input.h"
 
@@ -38,7 +40,7 @@ private:
 	int m_fpsFrameCount;
 };
 
-void glMessageCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam);
+void glMessageCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const char* message, const void* userParam);
 void glfwErrorCallback(int error, const char* description);
 void glfwKeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
 void glfwFrameBufferResizeCallback(GLFWwindow* window, int width, int height);

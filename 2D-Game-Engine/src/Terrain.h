@@ -1,34 +1,29 @@
 #pragma once
 
 #include "Blocks.h"
-#include "Camera.h"
+#include "TerrainRenderer.h"
+
 #include "SimplexNoise/SimplexNoise.h"
 
-#include <unordered_set>
 #include <future>
 #include <mutex>
 
 #define map(input, inputMin, inputMax, outputMin, outputMax) outputMin + ((outputMax - outputMin) / (inputMax - inputMin)) * (input - inputMin)
 
 #define SMOOTHNESS 400.0f // A smoothness value used for smoothing out noise (higher is smoother)
+#define TERRAIN_SMOOTHESS 800.0f  // A smoothness value used for smoothing out terrain noise (higher is smoother)
 
 #define CHUNK_SIZE 64 // The width (and height) of a chunk in blocks
 
-#define HEIGHT_FLUX 768 // The height fluctuation of the surface in pixels
+#define HEIGHT_FLUX 1536 // The height fluctuation of the surface in pixels
 #define SURFACE_OCTAVES 4 // The number of octaves used in the noise function for calculating terrain height (how many noise samples are blended together)
 
 #define STONE_OCTAVES 8 // The number of octaves used in the noise function for generating stone
 #define STONE_FLUX 64 // The fluctuation in stone noise values from -STONE_FLUX to STONE_FLUX
 #define STONE_WEIGHT 0 // The number the noise result must be greater than or equal to for stone to be generated
 
-#define CHUNK_CONTAINER_DISTANCE 2 // How many chunk containers in one direction excluding the center - must be an even number
-
-// The number of chunk containers (number of renderable chunks)
-#define CHUNK_CONTAINER_SIZE (CHUNK_CONTAINER_DISTANCE + 1) * (CHUNK_CONTAINER_DISTANCE + 1)
-
 #define CAMERA_VIEW_BUFFER_GEN 4 // Number of chunks to add to the camera's chunk when checking for chunk generation
 #define CAMERA_VIEW_BUFFER_UNLOAD 8 // Number of chunks to add to the camera's edge when checking for chunks to unload
-#define CAMERA_VIEW_BUFFER_CONTAINER_REASSIGN 128 // Number of pixels to add to the camera's edge when checking for chunk container reassignment
 
 #define TERRAIN_CHUNK_HEIGHT 16 // The number of vertical chunks in the terrain
 
@@ -48,13 +43,6 @@
 #define TREE_BRANCH_HEIGHT_MIN 4 // The minimum number of blocks above the base of the tree that branches will start to generate
 #define TREE_BRANCH_HEIGHT_MAX 10 // The maximum number of blocks above the base of the tree that branches will start to generate
 
-
-struct Block
-{
-	Sprite sprite;
-	BlockType blockType;
-};
-
 enum ChunkType
 {
 	CHUNK_AIR,
@@ -64,7 +52,7 @@ enum ChunkType
 
 struct Chunk
 {
-	Chunk(glm::vec2 chunkPosition) : chunkPosition(chunkPosition) {}
+	Chunk(glm::vec2 chunkPosition) : chunkPosition(chunkPosition), physicsObject(PhysicsObject(0)) {}
 
 	Block blocks[CHUNK_SIZE * CHUNK_SIZE];
 	unsigned int blockIndexMap[CHUNK_SIZE * CHUNK_SIZE];
@@ -72,6 +60,8 @@ struct Chunk
 
 	std::mutex mutex;
 	std::condition_variable cv;
+	
+	PhysicsObject physicsObject;
 
 	const glm::vec2 chunkPosition;
 	ChunkType chunkType;
@@ -81,35 +71,25 @@ struct Chunk
 	bool hasFullyLoaded;
 };
 
-struct ChunkContainer
-{
-	Chunk* chunk;
-	unsigned int vao;
-	unsigned int worldPositionsVBO;
-	unsigned int uvOffsetIndicesVBO;
-};
-
-struct CaveWorm
-{
-	glm::vec3 headNoisePosition;
-	glm::vec2 headChunkPosition;
-	size_t length;
-};
-
 class Terrain
 {
 public:
-	Terrain(const Camera& camera, unsigned int vertexBufferID, unsigned int indexBufferID);
+	Terrain(b2World& physicsWorld, glm::vec2 startingPosition, unsigned int vertexBufferID, unsigned int indexBufferID);
 	~Terrain();
 
+	Chunk* createChunk(glm::vec2 chunkPosition);
+	Chunk* getChunk(glm::vec2 chunkPosition) const;
+
+	void cameraUpdate(const Camera& camera);
 	void update();
 
-	std::vector<ChunkContainer*> getCollidingChunks(const Sprite& sprite);
-	const ChunkContainer* getChunkContainers() const;
+	void render(const Camera& camera) const;
+
+	static glm::vec2 worldToChunkCoords(glm::vec2 worldPosition);
+	static glm::vec2 chunkToWorldCoords(glm::vec2 chunkPosition);
+	static glm::vec2 snapToBlockGrid(glm::vec2 worldPosition);
 
 private:
-	Chunk* createChunk(glm::vec2 chunkPosition);
-
 	void genStartingChunks(glm::vec2 startingPosition);
 	void genChunks();
 	void queueGenChunk(Chunk* chunk);
@@ -124,39 +104,32 @@ private:
 
 	void genCave(Block* blocks, unsigned int blockCount[BLOCK_COUNT], glm::vec2 chunkWorldPosition);
 	std::vector<Chunk*> genCaveWorm(glm::vec2 chunkPosition);
-	std::vector<Chunk*> genTrees(Chunk* baseChunk);
-	void genTreeBranches(Chunk* chunk, int blockX, int treeHeight, float heightRatio, int direction, std::unordered_set<const Block*>& treeBlocks);
+	void genTrees(Chunk* baseChunk);
 
 	void sortBlockIndexMap(const Block blocks[CHUNK_SIZE * CHUNK_SIZE], unsigned int blockIndexMap[CHUNK_SIZE * CHUNK_SIZE]);
-	void updateDrawingBuffers(const size_t containerIndex);
-	void clearWorldPositions(const ChunkContainer& chunkContainer);
-	void clearUVOffsetIndices(const ChunkContainer& chunkContainer);
 
 	void checkThreadsFinished();
-	void checkShiftChunkContainers();
-	void checkGenChunks();
-	void checkUnloadChunks();
+	void checkGenChunks(const Camera& camera);
+	void checkUnloadChunks(const Camera& camera);
 
 	void setBlock(Block& block, BlockType type, glm::vec2 position, unsigned int uvOffsetIndex);
 	
 	int calculateSurfaceHeight(float chunkWorldPositionX, size_t blockX);
 
-	glm::vec2 worldToChunkCoords(glm::vec2 worldPosition) const;
-	glm::vec2 chunkToWorldCoords(glm::vec2 chunkPosition) const;
-	glm::vec2 snapToBlockGrid(glm::vec2 worldPosition) const;
+	TerrainRenderer* m_terrainRenderer;
 
-	const Camera& m_camera;
+	b2World& m_physicsWorld;
 
 	SimplexNoise* m_terrainNoise;
 	SimplexNoise* m_treeNoise;
 
 	std::unordered_map<glm::vec2, Chunk*> m_chunks;
-	ChunkContainer m_chunkContainers[CHUNK_CONTAINER_SIZE];
-
-	glm::vec2 m_chunkContainerOriginWorldPos;
 
 	std::vector<Chunk*> m_queuedChunksToGen;
 	std::mutex m_genQueueMutex;
+
 	std::vector<std::future<Chunk*>> m_genChunkThreads;
 	std::vector<std::future<std::vector<Chunk*>>> m_postGenThreads;
+
+	static std::vector<std::vector<std::vector<BlockType>>> s_treePatterns;
 };

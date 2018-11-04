@@ -1,7 +1,7 @@
 #include "stdafx.h"
 #include "Blocks.h"
 
-std::unordered_map<BlockType, RenderData> BlockContainer::blockRenderData = std::unordered_map<BlockType, RenderData>();
+std::vector<const Renderable*> BlockContainer::m_blockRenderData;
 
 BlockContainer::BlockContainer()
 {
@@ -9,34 +9,46 @@ BlockContainer::BlockContainer()
 
 	unsigned int terrainShaderID = assetManager->loadShader("terrainShader", "shaders/terrainVertexShader.glsl", "shaders/fragmentShader.glsl");
 	unsigned int blockSpritesheet = assetManager->loadTexture("blockSpritesheet", "textures/block_spritesheet2.png");
-
-	blockRenderData[AIR] = {};
-
-	glm::vec2 uvOffsetsDirt[MAX_ANIMATION_LENGTH] = { glm::vec2(1, 2) };
-	blockRenderData[DIRT] = RenderData(Texture(glm::vec2(256), blockSpritesheet), terrainShaderID, glm::vec2(16), 0, uvOffsetsDirt);
-
-	glm::vec2 uvOffsetsGrass[MAX_ANIMATION_LENGTH] = { glm::vec2(0, 0), glm::vec2(0, 1), glm::vec2(0, 3), glm::vec2(1, 3), glm::vec2(3, 3), glm::vec2(3, 2), glm::vec2(3, 0), glm::vec2(1, 0) };
-	blockRenderData[GRASS] = RenderData(Texture(glm::vec2(256), blockSpritesheet), terrainShaderID, glm::vec2(16), 2, uvOffsetsGrass);
 	
-	glm::vec2 uvOffsetsStone[MAX_ANIMATION_LENGTH] = { glm::vec2(5, 2) };
-	blockRenderData[STONE] = RenderData(Texture(glm::vec2(256), blockSpritesheet), terrainShaderID, glm::vec2(16), 0, uvOffsetsStone);
+	RendererSystem* renderSystem = RendererSystem::getInstance();
 
-	glm::vec2 uvOffsetsWood[MAX_ANIMATION_LENGTH] = { glm::vec2(8, 1) };
-	blockRenderData[WOOD] = RenderData(Texture(glm::vec2(256), blockSpritesheet), terrainShaderID, glm::vec2(16), 0, uvOffsetsWood);
+	// Air
+	renderSystem->addComponent(0, Texture(), glm::vec2(), 0, 0, nullptr);
 
-	glm::vec2 uvOffsetsBranch[MAX_ANIMATION_LENGTH] = { glm::vec2(8, 1) };
-	blockRenderData[BRANCH] = RenderData(Texture(glm::vec2(256), blockSpritesheet), terrainShaderID, glm::vec2(16), 0, uvOffsetsBranch);
+	// Dirt
+	glm::vec2 uvOffsetsDirt[MAX_ANIMATION_LENGTH] = { glm::vec2(1, 1) };
+	renderSystem->addComponent(0, Texture(glm::vec2(256), blockSpritesheet), glm::vec2(16), terrainShaderID, 0, uvOffsetsDirt);
 
-	glm::vec2 uvOffsetsLeaf[MAX_ANIMATION_LENGTH] = { glm::vec2(8, 2) };
-	blockRenderData[LEAF] = RenderData(Texture(glm::vec2(256), blockSpritesheet), terrainShaderID, glm::vec2(16), 0, uvOffsetsLeaf);
+	// Grass
+	glm::vec2 uvOffsetsGrass[MAX_ANIMATION_LENGTH] = { glm::vec2(0, 0), glm::vec2(0, 1), glm::vec2(0, 2), glm::vec2(1, 2), glm::vec2(2, 2), glm::vec2(2, 1), glm::vec2(2, 0), glm::vec2(1, 0) };
+	renderSystem->addComponent(0, Texture(glm::vec2(256), blockSpritesheet), glm::vec2(16), terrainShaderID, 0, uvOffsetsGrass);
+	
+	// Stone
+	glm::vec2 uvOffsetsStone[MAX_ANIMATION_LENGTH] = { glm::vec2(4, 1) };
+	renderSystem->addComponent(0, Texture(glm::vec2(256), blockSpritesheet), glm::vec2(16), terrainShaderID, 0, uvOffsetsStone);
+
+	// Wood
+	glm::vec2 uvOffsetsWood[MAX_ANIMATION_LENGTH] = { glm::vec2(6, 1) };
+	renderSystem->addComponent(0, Texture(glm::vec2(256), blockSpritesheet), glm::vec2(16), terrainShaderID, 0, uvOffsetsWood);
+
+	// Branch
+	glm::vec2 uvOffsetsBranch[MAX_ANIMATION_LENGTH] = { glm::vec2(6, 1) };
+	renderSystem->addComponent(0, Texture(glm::vec2(256), blockSpritesheet), glm::vec2(16), terrainShaderID, 0, uvOffsetsBranch);
+
+	// Leaf
+	glm::vec2 uvOffsetsLeaf[MAX_ANIMATION_LENGTH] = { glm::vec2(6, 2) };
+	renderSystem->addComponent(0, Texture(glm::vec2(256), blockSpritesheet), glm::vec2(16), terrainShaderID, 0, uvOffsetsLeaf);
+
+	m_blockRenderData = renderSystem->getComponents(0);
 }
 
 BlockContainer::~BlockContainer()
 {
 }
 
-const RenderData& BlockContainer::getBlockRenderData(BlockType name)
+const Renderable& BlockContainer::getBlockRenderData(BlockType name)
 {
-	assert(blockRenderData.find(name) != blockRenderData.end());
-	return blockRenderData[name];
+	assert((int)name >= 0 && (int)name < m_blockRenderData.size());
+
+	return *m_blockRenderData[name];
 }

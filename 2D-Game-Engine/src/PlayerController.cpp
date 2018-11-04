@@ -1,90 +1,41 @@
 #include "stdafx.h"
 #include "PlayerController.h"
 
-#include "AssetManager.h"
 #include "Input.h"
 
-PlayerController::PlayerController(const Transform& startingTransform)
+PlayerController::PlayerController(size_t playerID) : m_playerID(playerID), m_grounded(false), m_physicsSystem(*PhysicsSystem::getInstance())
 {
-	AssetManager* assetManager = AssetManager::getInstance();
-	unsigned int playerTextureID = assetManager->loadTexture("player", "textures/player.png");
-	unsigned int defaultShaderID = assetManager->getShader("defaultShader");
-
-	m_player = Sprite(
-		startingTransform,
-		RenderData(Texture(glm::vec2(32, 64), playerTextureID), defaultShaderID, glm::vec2(32, 64), 0, nullptr)
-	);
 }
 
-PlayerController::~PlayerController()
+size_t PlayerController::getPlayerID() const
 {
+	return m_playerID;
 }
 
 void PlayerController::update(float deltaTime)
 {
-	//if (Input::getInstance()->isKeyHeld(GLFW_KEY_LEFT))
-	//{
-	//	m_velocity.x -= 200;
-	//}
-
-	//if (Input::getInstance()->isKeyHeld(GLFW_KEY_RIGHT))
-	//{
-	//	m_velocity.x += 200;
-	//}
-
-	//if (Input::getInstance()->isKeyPressed(GLFW_KEY_SPACE))
-	//{
-	//	m_velocity.y += 2000;
-	//}
-
-	//// Gravity
-	//m_velocity.y -= 200;
-
-	//translate(m_velocity * deltaTime);
-	//m_velocity = glm::vec2();
-
 	if (Input::getInstance()->isKeyHeld(GLFW_KEY_LEFT))
 	{
-		m_player.transform.position.x -= 1000 * deltaTime;
+		m_physicsSystem.applyImpulse(m_playerID, glm::vec2(-100, 0));
 	}
 
 	if (Input::getInstance()->isKeyHeld(GLFW_KEY_RIGHT))
 	{
-		m_player.transform.position.x += 1000 * deltaTime;
+		m_physicsSystem.applyImpulse(m_playerID, glm::vec2(100, 0));
 	}
 
-	if (Input::getInstance()->isKeyHeld(GLFW_KEY_UP))
+	if (m_grounded && Input::getInstance()->isKeyPressed(GLFW_KEY_SPACE))
 	{
-		m_player.transform.position.y += 1000 * deltaTime;
-	}
-
-	if (Input::getInstance()->isKeyHeld(GLFW_KEY_DOWN))
-	{
-		m_player.transform.position.y -= 1000 * deltaTime;
+		m_physicsSystem.applyImpulse(m_playerID, glm::vec2(0, 2500));
 	}
 }
 
-void PlayerController::translate(glm::vec2 delta)
+void PlayerController::beginContact(const PhysicsObject* physicsObject, const PhysicsObject* other)
 {
-	m_player.transform.position += delta;
+	m_grounded = true;
 }
 
-void PlayerController::resize(glm::vec2 delta)
+void PlayerController::endContact(const PhysicsObject* physicsObject, const PhysicsObject* other)
 {
-	m_player.transform.size += delta;
-}
-
-glm::vec2 PlayerController::getPosition() const
-{
-	return m_player.transform.position;
-}
-
-glm::vec2 PlayerController::getSize() const
-{
-	return m_player.transform.size;
-}
-
-Sprite* PlayerController::getSprite()
-{
-	return &m_player;
+	m_grounded = false;
 }

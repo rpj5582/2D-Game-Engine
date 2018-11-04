@@ -1,9 +1,9 @@
 #pragma once
 
 #include "AssetManager.h"
-#include "Renderer.h"
+#include "Systems/Systems.h"
+#include "Terrain.h"
 #include "PlayerController.h"
-#include "CollisionHandler.h"
 
 class Engine
 {
@@ -17,9 +17,15 @@ public:
 
 private:
 	AssetManager* m_assetManager;
-	Renderer* m_renderer;
+	TransformSystem* m_transformSystem;
+	RendererSystem* m_renderSystem;
+	PhysicsSystem* m_physicsSystem;
 	Terrain* m_terrain;
 	Camera* m_camera;
 	PlayerController* m_playerController;
-	CollisionHandler* m_collisionHandler;
+
+#ifdef _DEBUG
+	DebugDrawPhysics* m_debugDraw;
+	bool m_shouldDrawDebugPhysics;
+#endif 
 };
